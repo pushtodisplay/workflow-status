@@ -78,10 +78,18 @@ test.afterEach(() => {
   resetEnv();
 });
 
+test("input: hyphen form (runner convention) and underscore form both work", () => {
+  setEnv({ "INPUT_STEPS-JSON": "{\"a\": {}}" });
+  assert.strictEqual(action.input("steps-json"), "{\"a\": {}}");
+  delete process.env["INPUT_STEPS-JSON"];
+  setEnv({ INPUT_STEPS_JSON: "{\"b\": {}}" });
+  assert.strictEqual(action.input("steps-json"), "{\"b\": {}}");
+});
+
 // ---------- position handling ----------
 
 test("first position (empty steps context) renders the banner", () => {
-  setEnv({ INPUT_STEPS_JSON: "{}", GITHUB_JOB: "detect-changes" });
+  setEnv({ "INPUT_STEPS-JSON": "{}", GITHUB_JOB: "detect-changes" });
   assert.deepStrictEqual(action.buildBlocks(), [
     { text: "[Backend Pipeline][detect-changes]", size: "small" },
     { text: "dev · abcdef1", size: "small", color: "#9ca3af" },
@@ -106,7 +114,7 @@ test("missing steps-json warns and falls back to the banner", () => {
 });
 
 test("unparsable steps-json warns and falls back to the banner", () => {
-  setEnv({ INPUT_STEPS_JSON: "{nope" });
+  setEnv({ "INPUT_STEPS-JSON": "{nope" });
   const cap = captureLogs();
   try {
     assert.deepStrictEqual(action.buildBlocks(), [
@@ -123,7 +131,7 @@ test("unparsable steps-json warns and falls back to the banner", () => {
 
 test("record: successful steps render green, runner and report steps hidden", () => {
   setEnv({
-    INPUT_STEPS_JSON: JSON.stringify({
+    "INPUT_STEPS-JSON": JSON.stringify({
       "set-up-job": { conclusion: "success" },
       "report-to-display----start-": { conclusion: "success" },
       "initialize-containers": { conclusion: "success" },
@@ -147,7 +155,7 @@ test("record: successful steps render green, runner and report steps hidden", ()
 
 test("mocked always(): failed step renders a red record", () => {
   setEnv({
-    INPUT_STEPS_JSON: JSON.stringify({
+    "INPUT_STEPS-JSON": JSON.stringify({
       "run-actions-checkout-v4": { conclusion: "success" },
       "install-dependencies-and-build": { conclusion: "success" },
       "run-all-tests-unit-integration": { conclusion: "failure" },
@@ -162,7 +170,7 @@ test("mocked always(): failed step renders a red record", () => {
 
 test("mocked always(): cancelled step counts as failed, rendered orange", () => {
   setEnv({
-    INPUT_STEPS_JSON: JSON.stringify({
+    "INPUT_STEPS-JSON": JSON.stringify({
       "set-up-job": { conclusion: "success" },
       "build-and-push": { conclusion: "cancelled" },
       "complete-job": { conclusion: "success" },
@@ -176,7 +184,7 @@ test("mocked always(): cancelled step counts as failed, rendered orange", () => 
 
 test("skipped step is shown grey and does not fail the record", () => {
   setEnv({
-    INPUT_STEPS_JSON: JSON.stringify({
+    "INPUT_STEPS-JSON": JSON.stringify({
       lint: { conclusion: "skipped" },
       build: { conclusion: "success" },
     }),
@@ -189,7 +197,7 @@ test("skipped step is shown grey and does not fail the record", () => {
 
 test("current report step (no conclusion yet) is ignored", () => {
   setEnv({
-    INPUT_STEPS_JSON: JSON.stringify({
+    "INPUT_STEPS-JSON": JSON.stringify({
       "run-actions-checkout-v4": { conclusion: "success" },
       "report-to-display----end-": { conclusion: null, outcome: null },
     }),
@@ -201,7 +209,7 @@ test("current report step (no conclusion yet) is ignored", () => {
 
 test("outcome is honored when conclusion is absent", () => {
   setEnv({
-    INPUT_STEPS_JSON: JSON.stringify({
+    "INPUT_STEPS-JSON": JSON.stringify({
       "run-all-tests-unit-integration": { outcome: "failure" },
     }),
   });
@@ -219,7 +227,7 @@ test("panel: main branch goes to prd panel, other branches to dev panel", () => 
 });
 
 test("panel: explicit panel-id wins over branch", () => {
-  setEnv({ INPUT_PANEL_ID: "3", GITHUB_REF: "refs/heads/dev" });
+  setEnv({ "INPUT_PANEL-ID": "3", GITHUB_REF: "refs/heads/dev" });
   assert.strictEqual(action.resolvePanel(), "3");
 });
 
@@ -227,7 +235,7 @@ test("panel: prd-branch input overrides default main", () => {
   setEnv({
     GITHUB_REF: "refs/heads/prod",
     GITHUB_REF_NAME: "prod",
-    INPUT_PRD_BRANCH: "prod",
+    "INPUT_PRD-BRANCH": "prod",
   });
   assert.strictEqual(action.resolvePanel(), "1");
 });
@@ -238,9 +246,9 @@ test("push: posts the rendered payload with the api key", async () => {
   const fetchMock = mockFetch(() => okResponse());
   try {
     setEnv({
-      INPUT_API_KEY: "test-key",
-      INPUT_API_URL: "http://board.test",
-      INPUT_BOARD_ID: "board-1",
+      "INPUT_API-KEY": "test-key",
+      "INPUT_API-URL": "http://board.test",
+      "INPUT_BOARD-ID": "board-1",
     });
     const blocks = action.bannerBlocks();
     await action.pushToDisplay("2", blocks);
@@ -262,7 +270,7 @@ test("push: missing api key warns and never fetches", async () => {
   const fetchMock = mockFetch(() => okResponse());
   const cap = captureLogs();
   try {
-    setEnv({ INPUT_API_URL: "http://board.test" });
+    setEnv({ "INPUT_API-URL": "http://board.test" });
     await action.pushToDisplay("2", action.bannerBlocks());
     assert.strictEqual(fetchMock.calls.length, 0);
     assert.ok(cap.logs.some((l) => l.includes("missing API key")));
@@ -275,7 +283,7 @@ test("push: missing api key warns and never fetches", async () => {
 test("push: api error throws a descriptive error (run() warns, exit stays 0)", async () => {
   const fetchMock = mockFetch(() => errResponse(401, "unauthorized"));
   try {
-    setEnv({ INPUT_API_KEY: "bad", INPUT_API_URL: "http://board.test" });
+    setEnv({ "INPUT_API-KEY": "bad", "INPUT_API-URL": "http://board.test" });
     await assert.rejects(
       action.pushToDisplay("2", action.bannerBlocks()),
       /401/,
@@ -290,7 +298,7 @@ test("push: timeout is surfaced as a clear timeout error", async () => {
     throw { name: "TimeoutError" };
   });
   try {
-    setEnv({ INPUT_API_KEY: "k", INPUT_API_URL: "http://board.test" });
+    setEnv({ "INPUT_API-KEY": "k", "INPUT_API-URL": "http://board.test" });
     await assert.rejects(
       action.pushToDisplay("2", action.bannerBlocks()),
       /timed out after 30s/,
@@ -309,7 +317,7 @@ test("run(): missing key + temp output file — warns, writes panel-id, exit 0",
   try {
     setEnv({
       GITHUB_OUTPUT: outFile,
-      INPUT_STEPS_JSON: JSON.stringify({
+      "INPUT_STEPS-JSON": JSON.stringify({
         "run-actions-checkout-v4": { conclusion: "success" },
       }),
     });
@@ -332,10 +340,10 @@ test("run(): push failure still writes panel-id and does not throw", async () =>
   try {
     fetchMock = mockFetch(() => errResponse(500, "boom"));
     setEnv({
-      INPUT_API_KEY: "k",
-      INPUT_API_URL: "http://board.test",
+      "INPUT_API-KEY": "k",
+      "INPUT_API-URL": "http://board.test",
       GITHUB_OUTPUT: outFile,
-      INPUT_STEPS_JSON: "{}",
+      "INPUT_STEPS-JSON": "{}",
     });
     await action.run();
     assert.strictEqual(process.exitCode, 0);

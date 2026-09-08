@@ -34,9 +34,14 @@ function warn(msg) {
   console.log(`::warning::Push to Display: ${msg}`);
 }
 
+// Inputs arrive as INPUT_<NAME> with the name uppercased (spaces → underscores)
+// but hyphens KEPT — e.g. steps-json → INPUT_STEPS-JSON (@actions/core
+// convention). Fall back to the hyphen→underscore form for lenient runs.
 function input(name) {
-  return (env[`INPUT_${name.replace(/-/g, "_").toUpperCase()}`] ?? "")
-    .trim();
+  const key = name.replace(/ /g, "_").toUpperCase();
+  const value =
+    env[`INPUT_${key}`] ?? env[`INPUT_${key.replace(/-/g, "_")}`] ?? "";
+  return value.trim();
 }
 
 function writeOutput(name, value) {

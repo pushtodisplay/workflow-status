@@ -22,17 +22,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        id: checkout
       - name: Report to display (first)
         uses: ./
         with:
           steps-json: ${{ toJSON(steps) }}
       - name: Simulated work
+        id: work
         run: echo "doing some work"
       - name: Report to display (middle)
         uses: ./
         with:
           steps-json: ${{ toJSON(steps) }}
       - name: Simulated work 2
+        id: work2
         run: echo "doing more work"
       - name: Report to display (end)
         if: always()
