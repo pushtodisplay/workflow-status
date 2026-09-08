@@ -21,7 +21,7 @@ Backend Pipeline · dev · abc1234
 ⏭ Apply tag
 ```
 
-Built on [`pushtodisplay/action`](https://github.com/pushtodisplay/action): this action renders the board message, the base action posts it.
+Runs as a `node20` action (the runner's bundled Node — no system Node required) and talks to the same Push to Display API as [`pushtodisplay/action`](https://github.com/pushtodisplay/action).
 
 ## Usage
 
@@ -31,6 +31,7 @@ Declare the credentials once at the workflow level (they are inherited by every 
 env:
   PUSH_TO_DISPLAY_API_KEY: ${{ secrets.PUSH_TO_DISPLAY_API_KEY }}
   PUSH_TO_DISPLAY_BOARD: ${{ vars.PUSH_TO_DISPLAY_BOARD }}
+  GITHUB_TOKEN: ${{ github.token }}    # for the end report's API read
 
 jobs:
   build-and-test:
@@ -64,7 +65,7 @@ jobs:
 ## How it works
 
 - **`phase: start`** — a "🚀 \<workflow\> started" banner, built from runner env only (no GitHub API call).
-- **`phase: end`** — reads the run's jobs and steps from the GitHub Actions API and renders a full snapshot: every job, the own job expanded step-by-step (its result derived from step conclusions), failed steps of other failed jobs.
+- **`phase: end`** — reads the run's jobs and steps from the GitHub Actions API (via `GITHUB_TOKEN`) and renders a full snapshot: every job, the own job expanded step-by-step (its result derived from step conclusions), failed steps of other failed jobs.
 - The own job's result is derived from its step conclusions (the job is still `in_progress` in the API while the report step runs).
 - Matrix/matrix-templated job names render as `(matrix)`, each leg reports independently.
 

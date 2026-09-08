@@ -1,5 +1,5 @@
 name: "Workflow Status"
-description: "Live per-job start/end workflow run reporting for a Push to Display board. Wraps pushtodisplay/action."
+description: "Live per-job start/end workflow run reporting for a Push to Display board. Uses the same API as pushtodisplay/action."
 author: "Goban Source, LLC"
 
 branding:
@@ -11,14 +11,14 @@ inputs:
     description: "Which end of the job this is: 'start' (first step) or 'end' (last step, if: always())."
     required: true
   api-key:
-    description: "API key for authentication. Optional when the job sets env PUSH_TO_DISPLAY_API_KEY."
+    description: "API key for authentication. Optional when the workflow or job sets env PUSH_TO_DISPLAY_API_KEY."
     required: false
   api-url:
     description: "Base URL of the Push to Display API. Override only for self-hosted instances or testing."
     required: false
     default: "https://api.pushtodisplay.com"
   board-id:
-    description: "Board ID to push to. Optional when the job sets env PUSH_TO_DISPLAY_BOARD. Omit to use the account's default board."
+    description: "Board ID to push to. Optional when the workflow or job sets env PUSH_TO_DISPLAY_BOARD. Omit to use the account's default board."
     required: false
   panel-id:
     description: "Explicit panel ID (1-4). Overrides branch-based resolution."
@@ -42,29 +42,7 @@ inputs:
 outputs:
   panel-id:
     description: "The panel ID that was used"
-    value: ${{ steps.render.outputs.panel-id }}
 
 runs:
-  using: "composite"
-  steps:
-    - name: Render report
-      id: render
-      shell: bash
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-        INPUT_PHASE: ${{ inputs.phase }}
-        INPUT_PANEL_ID: ${{ inputs.panel-id }}
-        INPUT_PRD_PANEL: ${{ inputs.prd-panel }}
-        INPUT_DEV_PANEL: ${{ inputs.dev-panel }}
-        INPUT_PRD_BRANCH: ${{ inputs.prd-branch }}
-        INPUT_LABEL: ${{ inputs.label }}
-      run: node ${{ github.action_path }}/scripts/report.mjs
-
-    - name: Push to Display
-      uses: pushtodisplay/action@v1
-      with:
-        api-url: ${{ inputs.api-url }}
-        api-key: ${{ inputs.api-key || env.PUSH_TO_DISPLAY_API_KEY }}
-        board-id: ${{ inputs.board-id || env.PUSH_TO_DISPLAY_BOARD }}
-        panel-id: ${{ steps.render.outputs.panel-id }}
-        blocks: ${{ steps.render.outputs.blocks }}
+  using: "node20"
+  main: "main.js"

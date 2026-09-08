@@ -1,31 +1,29 @@
-#!/usr/bin/env node
 /*
- * Opinionated Push to Display — per-job start/end reporter.
+ * Workflow Status — live per-job start/end workflow run reporting.
  *
- * INPUT_PHASE=start:
- *   Renders a "🚀 <workflow> started" banner from runner env only — no GitHub
- *   API call at all, so start reports cost zero rate-limit budget.
+ * PHASE=start: renders a "🚀 <workflow> started" banner from runner env only —
+ *              no GitHub API call, so start reports cost zero rate-limit budget.
+ * PHASE=end:   reads the current workflow run's jobs/steps from the GitHub
+ *              Actions API and renders a full run snapshot (every job, the own
+ *              job expanded step-by-step, failed steps of other failed jobs),
+ *              then POSTs the rendered message to the Push to Display API.
  *
- * INPUT_PHASE=end:
- *   Reads the current workflow run's jobs/steps from the GitHub Actions API
- *   and renders a full run snapshot: every job's status, the own job expanded
- *   step-by-step (its conclusion derived from the step conclusions — the job is
- *   still technically in_progress in the API while this step runs), and failed
- *   steps of other failed jobs.
+ * Fails soft: any error emits an annotation warning; process exits 0 — the
+ * workflow result is never affected. No dependencies, no retries, 30s bounds.
  *
- * Fails soft: any error emits an annotation warning and a small fallback
- * block, then exits 0 — the workflow result is never affected.
- *
- * Reads from the runner environment:
- *   GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_REF,
- *   GITHUB_REF_NAME, GITHUB_HEAD_REF, GITHUB_SHA, GITHUB_WORKFLOW,
- *   GITHUB_JOB, GITHUB_TOKEN, GITHUB_OUTPUT
- * plus the INPUT_* passthroughs set by action.yml.
+ * Reads inputs from INPUT_* env (set by the runner from action.yml inputs):
+ *   INPUT_PHASE, INPUT_API_KEY, INPUT_API_URL, INPUT_BOARD_ID, INPUT_PANEL_ID,
+ *   INPUT_PRD_PANEL, INPUT_DEV_PANEL, INPUT_PRD_BRANCH, INPUT_LABEL
+ * plus runner env: GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT,
+ *   GITHUB_REF, GITHUB_REF_NAME, GITHUB_HEAD_REF, GITHUB_SHA,
+ *   GITHUB_WORKFLOW, GITHUB_JOB, GITHUB_TOKEN, GITHUB_OUTPUT
+ * plus fallbacks: PUSH_TO_DISPLAY_API_KEY, PUSH_TO_DISPLAY_BOARD.
  */
-import { appendFileSync } from "node:fs";
+const { appendFileSync } = require("node:fs");
 
 const env = process.env;
 const MAX_BLOCKS = 60;
+const REQUEST_TIMEOUT_MS = 30_000; // the action owns its own bound
 
 // ---------- helpers ----------
 
@@ -33,23 +31,25 @@ function warn(msg) {
   console.log(`::warning::Push to Display: ${msg}`);
 }
 
-function writeOutput(blocksJson, panelId) {
+function input(name) {
+  return (env[`INPUT_${name.replace(/-/g, "_").toUpperCase()}`] ?? "")
+    .trim();
+}
+
+function writeOutput(name, value) {
   const out = env.GITHUB_OUTPUT;
   if (!out) return;
-  // Heredoc form so arbitrary JSON content is safe in GITHUB_OUTPUT.
-  appendFileSync(
-    out,
-    `blocks<<PTD_EOF\n${blocksJson}\nPTD_EOF\npanel-id=${panelId}\n`,
-  );
+  appendFileSync(out, `${name}<<PTD_EOF\n${value}\nPTD_EOF\n`);
 }
 
 function fmtDuration(startedAt, completedAt) {
   if (!startedAt || !completedAt) return "";
-  const secs = Math.max(
-    0,
-    Math.round((Date.parse(completedAt) - Date.parse(startedAt)) / 1000),
+  return fmtSecs(
+    Math.max(
+      0,
+      Math.round((Date.parse(completedAt) - Date.parse(startedAt)) / 1000),
+    ),
   );
-  return fmtSecs(secs);
 }
 
 function fmtSecs(secs) {
@@ -90,9 +90,9 @@ function isAutoStep(name) {
   );
 }
 
-// Derive the own job's conclusion from its step conclusions: while this
-// report step runs, the API still reports the job as in_progress, but every
-// previous (user) step already has its final conclusion.
+// Derive the own job's conclusion: while this report step runs, the API still
+// reports the job as in_progress, but every previous (user) step already has
+// its final conclusion.
 function deriveOwnConclusion(ownJob) {
   const steps = (ownJob.steps ?? []).filter(
     (s) => !isAutoStep(s.name) && s.status === "completed",
@@ -109,11 +109,7 @@ function deriveOwnConclusion(ownJob) {
 
 // ---------- inputs ----------
 
-function input(name) {
-  return (env[name] ?? "").trim();
-}
-
-const label = input("INPUT_LABEL") || env.GITHUB_WORKFLOW || "workflow";
+const label = input("label") || env.GITHUB_WORKFLOW || "workflow";
 const ref = env.GITHUB_REF || "";
 const branch =
   env.GITHUB_HEAD_REF ||
@@ -123,12 +119,12 @@ const sha = (env.GITHUB_SHA || "").slice(0, 7);
 const selfJob = env.GITHUB_JOB || "";
 
 function resolvePanel() {
-  const override = input("INPUT_PANEL_ID");
+  const override = input("panel-id");
   if (override) return override;
-  const prdBranch = input("INPUT_PRD_BRANCH") || "main";
+  const prdBranch = input("prd-branch") || "main";
   return ref === `refs/heads/${prdBranch}`
-    ? input("INPUT_PRD_PANEL") || "1"
-    : input("INPUT_DEV_PANEL") || "2";
+    ? input("prd-panel") || "1"
+    : input("dev-panel") || "2";
 }
 
 // ---------- GitHub Actions API ----------
@@ -138,7 +134,7 @@ async function listJobs(repo, runId, attempt, token) {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": "pushtodisplay-opinionated-action",
+    "User-Agent": "pushtodisplay-workflow-status",
   };
   const base = `https://api.github.com/repos/${repo}/actions/runs/${runId}`;
   let endpoint = `${base}/attempts/${attempt}/jobs`;
@@ -150,7 +146,7 @@ async function listJobs(repo, runId, attempt, token) {
     const url = `${endpoint}?per_page=100&page=${page}`;
     const res = await fetch(url, {
       headers,
-      signal: AbortSignal.timeout(30_000), // the action owns its own bound
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (res.status === 404 && !filterByAttempt) {
       // Very old runner/API fallback: list jobs for the run, filter client-side.
@@ -183,62 +179,47 @@ async function listJobs(repo, runId, attempt, token) {
   return all;
 }
 
-// ---------- start phase (no API call) ----------
+// ---------- rendering ----------
 
-function startReport() {
-  const panelId = resolvePanel();
-  const blocks = [
+function startBlocks() {
+  return [
     { text: `\u{1F680} ${label} started`, size: "large", weight: "bold" },
     { text: `${branch} \u00b7 ${sha}`, size: "medium", color: "#9ca3af" },
   ];
-  writeOutput(JSON.stringify(blocks), panelId);
-  console.log(`Push to Display: start banner, panel ${panelId}`);
-  process.exit(0);
 }
 
-// ---------- end phase ----------
-
-async function endReport() {
+async function endBlocks() {
   const repo = env.GITHUB_REPOSITORY;
   const runId = env.GITHUB_RUN_ID;
   const attempt = env.GITHUB_RUN_ATTEMPT || "1";
   const token = env.GITHUB_TOKEN || "";
 
   if (!repo || !runId || !token) {
-    throw new Error(
-      "missing GITHUB_REPOSITORY / GITHUB_RUN_ID / GITHUB_TOKEN",
-    );
+    throw new Error("missing GITHUB_REPOSITORY / GITHUB_RUN_ID / GITHUB_TOKEN");
   }
 
-  const panelId = resolvePanel();
-  const jobs = await listJobs(repo, runId, attempt, token);
-  const sorted = jobs.sort((a, b) =>
+  const jobs = (await listJobs(repo, runId, attempt, token)).sort((a, b) =>
     (a.started_at ?? "").localeCompare(b.started_at ?? ""),
   );
 
   const blocks = [];
-  const okCount = sorted.filter((j) => j.conclusion === "success").length;
-  const firstStart = sorted.find((j) => j.started_at)?.started_at;
+  const okCount = jobs.filter((j) => j.conclusion === "success").length;
+  const firstStart = jobs.find((j) => j.started_at)?.started_at;
   const ago = firstStart
     ? `\u00b7 started ${fmtSecs(Math.max(0, Math.round((Date.now() - Date.parse(firstStart)) / 1000)))} ago`
     : "";
+  blocks.push({ text: `${label} \u00b7 ${branch} \u00b7 ${sha}`, size: "small" });
   blocks.push({
-    text: `${label} \u00b7 ${branch} \u00b7 ${sha}`,
-    size: "small",
-  });
-  blocks.push({
-    text: `${okCount}/${sorted.length} jobs ok ${ago}`.trim(),
+    text: `${okCount}/${jobs.length} jobs ok ${ago}`.trim(),
     size: "small",
     color: "#9ca3af",
   });
 
-  for (const job of sorted) {
+  for (const job of jobs) {
     const own = job.name === selfJob;
     let style = jobStyle(job);
     let duration = fmtDuration(job.started_at, job.completed_at);
     if (own) {
-      // The job is still in_progress in the API while this report step runs —
-      // derive its result from the step conclusions instead.
       const conclusion = deriveOwnConclusion(job);
       style = JOB_STYLES[conclusion];
       duration = fmtDuration(job.started_at, new Date().toISOString());
@@ -285,29 +266,73 @@ async function endReport() {
     blocks.splice(MAX_BLOCKS);
     blocks.push({ text: "\u2026and more", size: "small", color: "#9ca3af" });
   }
+  return blocks;
+}
 
-  writeOutput(JSON.stringify(blocks), panelId);
-  console.log(
-    `Push to Display: ${okCount}/${sorted.length} jobs, panel ${panelId}, ${blocks.length} blocks`,
-  );
+// ---------- Push to Display API ----------
+
+async function pushToDisplay(panelId, blocks) {
+  const apiUrl = input("api-url") || "https://api.pushtodisplay.com";
+  const apiKey =
+    input("api-key") || env.PUSH_TO_DISPLAY_API_KEY || "";
+  const boardId = input("board-id") || env.PUSH_TO_DISPLAY_BOARD || "";
+  if (!apiKey) {
+    warn(
+      "missing API key — set the api-key input or env PUSH_TO_DISPLAY_API_KEY; no message pushed",
+    );
+    return;
+  }
+
+  const url = `${apiUrl}/v1/updates`;
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Api-Key": apiKey,
+      },
+      body: JSON.stringify({ boardId, panelId, blocks }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if ((error && error.name) === "TimeoutError") {
+      throw new Error(`Push to Display API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+    }
+    throw error;
+  }
+
+  if (!response.ok) {
+    const body = (await response.text().catch(() => "")).slice(0, 300);
+    throw new Error(
+      `Push to Display API returned ${response.status}: ${body}`
+        .replace(/\r?\n/g, " ")
+        .replace(/\s+/g, " "),
+    );
+  }
+  console.log(`Push to Display: message pushed, panel ${panelId}`);
 }
 
 // ---------- main ----------
 
-try {
-  if (input("INPUT_PHASE") === "start") {
-    startReport();
-  } else {
-    await endReport();
+(async () => {
+  try {
+    const panelId = resolvePanel();
+    const blocks =
+      input("phase") === "start" ? startBlocks() : await endBlocks();
+    writeOutput("panel-id", panelId);
+    try {
+      await pushToDisplay(panelId, blocks);
+    } catch (pushErr) {
+      // The push failing never fails the workflow.
+      warn(pushErr.message);
+    }
+    process.exit(0);
+  } catch (err) {
+    warn(err.message);
+    const panelId = resolvePanel();
+    writeOutput("panel-id", panelId);
+    process.exit(0);
   }
-} catch (err) {
-  warn(err.message);
-  const panelId = resolvePanel();
-  writeOutput(
-    JSON.stringify([
-      { text: `\u26a0 Push to Display: ${err.message}`, color: "#f59e0b" },
-    ]),
-    panelId,
-  );
-  process.exit(0);
-}
+})();
