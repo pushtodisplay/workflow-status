@@ -1,22 +1,24 @@
 /*
- * Workflow Status — live per-job start/end workflow run reporting.
+ * Workflow Status — own-job reporting for a Push to Display board.
  *
- * PHASE=start: renders a "🚀 <workflow> started" banner from runner env only —
- *              no GitHub API call, so start reports cost zero rate-limit budget.
- * PHASE=end:   reads the current workflow run's jobs/steps from the GitHub
- *              Actions API and renders a full run snapshot (every job, the own
- *              job expanded step-by-step, failed steps of other failed jobs),
- *              then POSTs the rendered message to the Push to Display API.
+ * One report step per job, placed anywhere in the job:
+ *   - first step (nothing has run yet): "job started" banner — env only
+ *   - any later step: the job's own record — verdict + every user step that
+ *     already has a result (progress or final, depending on placement)
+ *
+ * No GitHub API, no GITHUB_TOKEN, no permissions needed. The job's own
+ * step results come from the calling workflow's steps context, passed as
+ * steps-json = ${{ toJSON(steps) }} and computed by GitHub itself.
  *
  * Fails soft: any error emits an annotation warning; process exits 0 — the
- * workflow result is never affected. No dependencies, no retries, 30s bounds.
+ * workflow result is never affected. No dependencies, no retries, 30s bound.
  *
  * Reads inputs from INPUT_* env (set by the runner from action.yml inputs):
- *   INPUT_PHASE, INPUT_API_KEY, INPUT_API_URL, INPUT_BOARD_ID, INPUT_PANEL_ID,
- *   INPUT_PRD_PANEL, INPUT_DEV_PANEL, INPUT_PRD_BRANCH, INPUT_LABEL
- * plus runner env: GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT,
- *   GITHUB_REF, GITHUB_REF_NAME, GITHUB_HEAD_REF, GITHUB_SHA,
- *   GITHUB_WORKFLOW, GITHUB_JOB, GITHUB_TOKEN, GITHUB_OUTPUT
+ *   INPUT_STEPS_JSON, INPUT_API_KEY, INPUT_API_URL, INPUT_BOARD_ID,
+ *   INPUT_PANEL_ID, INPUT_PRD_PANEL, INPUT_DEV_PANEL, INPUT_PRD_BRANCH,
+ *   INPUT_LABEL
+ * plus runner env: GITHUB_WORKFLOW, GITHUB_JOB, GITHUB_REF, GITHUB_REF_NAME,
+ *   GITHUB_HEAD_REF, GITHUB_SHA, GITHUB_OUTPUT
  * plus fallbacks: PUSH_TO_DISPLAY_API_KEY, PUSH_TO_DISPLAY_BOARD.
  */
 const { appendFileSync } = require("node:fs");
@@ -42,109 +44,6 @@ function writeOutput(name, value) {
   appendFileSync(out, `${name}<<PTD_EOF\n${value}\nPTD_EOF\n`);
 }
 
-function fmtDuration(startedAt, completedAt) {
-  if (!startedAt || !completedAt) return "";
-  return fmtSecs(
-    Math.max(
-      0,
-      Math.round((Date.parse(completedAt) - Date.parse(startedAt)) / 1000),
-    ),
-  );
-}
-
-function fmtSecs(secs) {
-  if (secs < 60) return `${secs}s`;
-  const m = Math.floor(secs / 60);
-  const rest = secs % 60;
-  if (m < 60) return `${m}m ${rest}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
-
-function fmtUtc(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  const p = (n) => String(n).padStart(2, "0");
-  return (
-    `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ` +
-    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`
-  );
-}
-
-const JOB_STYLES = {
-  success: { sym: "\u2713", color: "#22c55e" }, // ✓ green
-  failure: { sym: "\u2717", color: "#ef4444" }, // ✗ red
-  cancelled: { sym: "\u2717", color: "#f59e0b" }, // ✗ orange
-  skipped: { sym: "\u23ed", color: "#9ca3af" }, // ⏭ grey
-  queued: { sym: "\u25cc", color: "#93c5fd" }, // ◌ light blue
-  in_progress: { sym: "\u25cc", color: "#3b82f6" }, // ◌ blue
-};
-
-function jobStyle(job) {
-  if (job.status === "in_progress" || job.status === "queued") {
-    return JOB_STYLES[job.status];
-  }
-  return JOB_STYLES[job.conclusion] ?? { sym: "\u25cc", color: "#9ca3af" };
-}
-
-// The API leaves ${{ ... }} templates unrendered in matrix job names.
-function displayName(name) {
-  return (name ?? "").replace(/\$\{\{[^}]*\}\}/g, "matrix");
-}
-
-// Steps the runner adds automatically — not user steps, hide them.
-function isAutoStep(name) {
-  return (
-    name === "Set up job" ||
-    name === "Complete job" ||
-    (name ?? "").startsWith("Post ")
-  );
-}
-
-// Exact own-job verdict from the caller's steps context (GitHub-computed).
-// The workflow passes it as steps-json (= toJSON(steps)); the action's JS
-// cannot evaluate workflow expressions itself, so the caller provides the
-// evaluation. Returns null when unavailable.
-function ownConclusionFromStepsJson() {
-  const raw = input("steps-json");
-  if (!raw) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  const terminal = Object.values(parsed)
-    .map((s) => (s && (s.conclusion || s.outcome)) || null)
-    .filter(
-      (c) =>
-        c === "success" ||
-        c === "failure" ||
-        c === "cancelled" ||
-        c === "skipped",
-    );
-  if (terminal.length === 0) return null;
-  return terminal.some((c) => c === "failure" || c === "cancelled")
-    ? "failure"
-    : "success";
-}
-
-// Derive the own job's conclusion: while this report step runs, the API still
-// reports the job as in_progress, but every previous (user) step already has
-// its final conclusion. Fallback only when steps-json is unavailable.
-function deriveOwnConclusion(ownJob) {
-  const steps = (ownJob.steps ?? []).filter(
-    (s) => !isAutoStep(s.name) && s.status === "completed",
-  );
-  if (
-    steps.some(
-      (s) => s.conclusion === "failure" || s.conclusion === "cancelled",
-    )
-  ) {
-    return "failure";
-  }
-  return "success";
-}
-
 // ---------- inputs ----------
 
 const label = input("label") || env.GITHUB_WORKFLOW || "workflow";
@@ -165,168 +64,109 @@ function resolvePanel() {
     : input("dev-panel") || "2";
 }
 
-// ---------- GitHub Actions API ----------
+// ---------- own-job record ----------
 
-async function listJobs(repo, runId, attempt, token) {
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": "pushtodisplay-workflow-status",
-  };
-  const base = `https://api.github.com/repos/${repo}/actions/runs/${runId}`;
-  let endpoint = `${base}/attempts/${attempt}/jobs`;
-  let filterByAttempt = false;
-  const all = [];
-  let page = 1;
+const STEP_STYLES = {
+  success: { sym: "\u2713", color: "#22c55e" }, // ✓ green
+  failure: { sym: "\u2717", color: "#ef4444" }, // ✗ red
+  cancelled: { sym: "\u2717", color: "#f59e0b" }, // ✗ orange
+  skipped: { sym: "\u23ed", color: "#9ca3af" }, // ⏭ grey
+};
 
-  for (;;) {
-    const url = `${endpoint}?per_page=100&page=${page}`;
-    const res = await fetch(url, {
-      headers,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    if (res.status === 404 && !filterByAttempt) {
-      // Very old runner/API fallback: list jobs for the run, filter client-side.
-      endpoint = `${base}/jobs`;
-      filterByAttempt = true;
-      page = 1;
-      continue;
-    }
-    if (!res.ok) {
-      const body = (await res.text().catch(() => "")).slice(0, 300);
-      const hint =
-        res.status === 403
-          ? " — add 'permissions: actions: read' to the job"
-          : "";
-      throw new Error(
-        `GitHub Actions API ${res.status}: ${body}${hint}`
-          .replace(/\r?\n/g, " ")
-          .replace(/\s+/g, " "),
-      );
-    }
-    const data = await res.json();
-    const jobs = (data.jobs ?? []).filter(
-      (j) => !filterByAttempt || j.run_attempt === Number(attempt),
-    );
-    all.push(...jobs);
-    const link = res.headers.get("link") || "";
-    if (!link.includes('rel="next"') || jobs.length === 0) break;
-    page += 1;
-  }
-  return all;
+// Steps that are not the user's own: runner machinery (Set up job, Post …,
+// Complete job, container init/stop) and the Push to Display reporter itself.
+// Steps are keyed by their (auto-generated) step id — GitHub's own
+// normalization of the step name: lowercased, non-alphanumerics -> hyphens.
+function isHiddenStep(key) {
+  const k = (key || "").toLowerCase();
+  return (
+    k === "set-up-job" ||
+    k === "complete-job" ||
+    k === "initialize-containers" ||
+    k === "stop-containers" ||
+    k.startsWith("post-") ||
+    k.includes("report-to-display") ||
+    k.includes("push-to-display") ||
+    k.includes("pushtodisplay")
+  );
 }
 
-// ---------- rendering ----------
+// Step ids shown verbatim as GitHub normalized them; tidy runs of hyphens.
+function displayStepName(key) {
+  return (key || "").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
 
-function startBlocks() {
+function parseStepsJson() {
+  const raw = input("steps-json");
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function bannerBlocks() {
   return [
     { text: `[${label}][${selfJob}]`, size: "small" },
     { text: `${branch} \u00b7 ${sha}`, size: "small", color: "#9ca3af" },
   ];
 }
 
-async function endBlocks() {
-  const repo = env.GITHUB_REPOSITORY;
-  const runId = env.GITHUB_RUN_ID;
-  const attempt = env.GITHUB_RUN_ATTEMPT || "1";
-  const token = env.GITHUB_TOKEN || "";
-
-  if (!repo || !runId || !token) {
-    throw new Error("missing GITHUB_REPOSITORY / GITHUB_RUN_ID / GITHUB_TOKEN");
+function buildBlocks() {
+  const stepsJson = parseStepsJson();
+  if (stepsJson === null) {
+    warn(
+      "steps-json missing or unparsable — pass with: steps-json: ${{ toJSON(steps) }}; only run metadata pushed",
+    );
+    return bannerBlocks();
   }
 
-  const jobs = (await listJobs(repo, runId, attempt, token)).sort((a, b) =>
-    (a.started_at ?? "").localeCompare(b.started_at ?? ""),
+  const terminal = Object.entries(stepsJson)
+    .map(([key, value]) => ({
+      key,
+      conclusion: (value && (value.conclusion || value.outcome)) || null,
+    }))
+    .filter(
+      (s) =>
+        !isHiddenStep(s.key) &&
+        (s.conclusion === "success" ||
+          s.conclusion === "failure" ||
+          s.conclusion === "cancelled" ||
+          s.conclusion === "skipped"),
+    );
+
+  // Nothing has run yet: this step is the first step of the job — announce it.
+  if (terminal.length === 0) return bannerBlocks();
+
+  const failed = terminal.filter(
+    (s) => s.conclusion === "failure" || s.conclusion === "cancelled",
   );
+  const sym = failed.length ? "\u2717" : "\u2713";
+  const color = failed.length ? "#ef4444" : "#22c55e";
 
-  const ownJob = jobs.find((j) => j.name === selfJob);
-  let ownConclusion = null;
-  if (ownJob) {
-    ownConclusion = ownConclusionFromStepsJson();
-    if (ownConclusion === null) {
-      ownConclusion = deriveOwnConclusion(ownJob);
-      warn(
-        "steps-json not provided on this end report; own-job result derived from API step data — pass steps-json: ${{ toJSON(steps) }} for the exact result",
-      );
-    }
-  }
-
-  const blocks = [];
-  const okCount =
-    jobs.filter((j) => j.conclusion === "success").length +
-    (ownConclusion === "success" ? 1 : 0);
-  const finishedCount =
-    jobs.filter((j) => j.conclusion !== null && j.conclusion !== undefined)
-      .length + (ownJob ? 1 : 0);
-  const runningCount = jobs.filter(
-    (j) => j.status === "in_progress" && j !== ownJob,
-  ).length;
-  const queuedCount = jobs.filter((j) => j.status === "queued").length;
-  const firstStart = jobs.find((j) => j.started_at)?.started_at;
-  const started = firstStart ? `\u00b7 started ${fmtUtc(firstStart)}` : "";
-  let summary = `${okCount}/${finishedCount} jobs ok`;
-  if (runningCount) summary += ` \u00b7 ${runningCount} running`;
-  if (queuedCount) summary += ` \u00b7 ${queuedCount} queued`;
-  blocks.push({ text: `[${label}][${selfJob}]`, size: "small" });
-  blocks.push({
-    text: `${branch} \u00b7 ${sha}`,
-    size: "small",
-    color: "#9ca3af",
-  });
-  blocks.push({
-    text: `${summary} ${started}`.trim(),
-    size: "small",
-    color: "#9ca3af",
-  });
-
-  for (const job of jobs) {
-    const own = job.name === selfJob;
-    let style = jobStyle(job);
-    let duration = fmtDuration(job.started_at, job.completed_at);
-    if (own) {
-      style = JOB_STYLES[ownConclusion ?? deriveOwnConclusion(job)];
-      duration = fmtDuration(job.started_at, new Date().toISOString());
-    }
+  const blocks = [
+    { text: `[${label}][${selfJob}]`, size: "small" },
+    { text: `${branch} \u00b7 ${sha}`, size: "small", color: "#9ca3af" },
+    {
+      text: `${sym} ${terminal.length} steps${
+        failed.length ? ` \u00b7 ${failed.length} failed` : ""
+      }`,
+      size: "small",
+      color,
+    },
+  ];
+  for (const step of terminal) {
+    const style = STEP_STYLES[step.conclusion] ?? {
+      sym: "\u25cc",
+      color: "#9ca3af",
+    };
     blocks.push({
-      text: `${style.sym} ${displayName(job.name)}${
-        own ? " (this job)" : ""
-      }${duration ? ` \u00b7 ${duration}` : ""}`,
+      text: `  ${style.sym} ${displayStepName(step.key)}`,
       size: "small",
       color: style.color,
     });
-
-    if (own) {
-      for (const step of job.steps ?? []) {
-        if (isAutoStep(step.name)) continue;
-        if (step.status !== "completed") continue; // this report step
-        const style2 =
-          JOB_STYLES[step.conclusion] ?? { sym: "\u25cc", color: "#9ca3af" };
-        const d = fmtDuration(step.started_at, step.completed_at);
-        blocks.push({
-          text: `  ${style2.sym} ${step.name}${d ? ` \u00b7 ${d}` : ""}`,
-          size: "small",
-          color: style2.color,
-        });
-      }
-      continue;
-    }
-
-    if (job.conclusion === "failure" || job.conclusion === "cancelled") {
-      for (const step of job.steps ?? []) {
-        if (step.conclusion !== "failure" && step.conclusion !== "cancelled")
-          continue;
-        if (isAutoStep(step.name)) continue;
-        const d = fmtDuration(step.started_at, step.completed_at);
-        blocks.push({
-          text: `  ${step.name}${d ? ` \u00b7 ${d}` : ""}`,
-          size: "small",
-          color: "#ef4444",
-        });
-      }
-    }
   }
-
   if (blocks.length > MAX_BLOCKS) {
     blocks.splice(MAX_BLOCKS);
     blocks.push({ text: "\u2026and more", size: "small", color: "#9ca3af" });
@@ -363,7 +203,9 @@ async function pushToDisplay(panelId, blocks) {
     });
   } catch (error) {
     if ((error && error.name) === "TimeoutError") {
-      throw new Error(`Push to Display API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+      throw new Error(
+        `Push to Display API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`,
+      );
     }
     throw error;
   }
@@ -384,8 +226,7 @@ async function pushToDisplay(panelId, blocks) {
 (async () => {
   try {
     const panelId = resolvePanel();
-    const blocks =
-      input("phase") === "start" ? startBlocks() : await endBlocks();
+    const blocks = buildBlocks();
     writeOutput("panel-id", panelId);
     try {
       await pushToDisplay(panelId, blocks);

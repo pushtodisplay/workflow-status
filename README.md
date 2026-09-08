@@ -1,83 +1,81 @@
 # Workflow Status
 
-Live per-job reporting for your [Push to Display](https://pushtodisplay.com) board. Add two lines to every job and your board fills in as the run progresses:
+Live GitHub Actions job status on your [Push to Display](https://pushtodisplay.com) board, reported **from inside each job** — one step, any position, own job only.
 
-```
-[Backend Pipeline][detect-changes]
-dev · abc1234
-```
+No GitHub API. No `GITHUB_TOKEN`. No rate limits. No permissions. Runs as a `node20` action (the runner's bundled Node — no system Node required) and talks to the same Push to Display API as [`pushtodisplay/action`](https://github.com/pushtodisplay/action).
 
-…then, as each job finishes, the board refreshes with the whole run:
+## How it works
 
-```
-Backend Pipeline · dev · abc1234
-2/4 jobs ok · started 2026-09-08 02:43:06 UTC
-✓ detect-changes · 12s
-✗ build-and-test (this job) · 10m 51s
-  ✓ Initialize containers
-  ✓ Run actions/checkout@v4.2.0
-  ✗ Deploy reports to self-hosted server · 3s
-◌ Build Docker Image (matrix) · 2 legs running
-⏭ Apply tag
-```
+Add one report step to a job. The step reacts to where it is:
 
-Runs as a `node20` action (the runner's bundled Node — no system Node required) and talks to the same Push to Display API as [`pushtodisplay/action`](https://github.com/pushtodisplay/action).
+- **First step of the job** — nothing has run yet → pushes a "job started" banner (built from runner env only).
+- **Any later step** — pushes the job's own record: verdict + every user step that already has a result (progress if mid-job, the full record if last).
+- **`if: always()`** on the last step → the record is pushed even after failures.
+
+The job's step results come from the calling workflow's `steps` context (`${{ toJSON(steps) }}`) — computed by GitHub itself, exact by construction. Step ids are GitHub's own normalization of step names (lowercased, `-` separators); the report step itself and the runner's machinery (`Set up job`, `Post …`, etc.) are hidden.
 
 ## Usage
-
-Declare the credentials once at the workflow level (they are inherited by every job), then add a **start** report as each job's first step and an **end** report as its last step:
 
 ```yaml
 env:
   PUSH_TO_DISPLAY_API_KEY: ${{ secrets.PUSH_TO_DISPLAY_API_KEY }}
   PUSH_TO_DISPLAY_BOARD: ${{ vars.PUSH_TO_DISPLAY_BOARD }}
-  GITHUB_TOKEN: ${{ github.token }}    # for the end report's API read
 
 jobs:
   build-and-test:
+    runs-on: ubuntu-latest
     steps:
-      - name: Report to display (start)
+      - name: Report to display
         uses: pushtodisplay/workflow-status@v1
         with:
-          phase: start
+          steps-json: ${{ toJSON(steps) }}
       - run: dotnet build
       - run: dotnet test
       - name: Report to display (end)
         if: always()
         uses: pushtodisplay/workflow-status@v1
         with:
-          phase: end
           steps-json: ${{ toJSON(steps) }}
 ```
 
-### Inputs
+First step = "started" banner; last step with `if: always()` = the job's record. Same config both times — no `phase`, nothing to learn.
 
-| Input | Required | Purpose |
+## What the board shows
+
+```
+[Backend Pipeline][build-and-test]
+dev · 6c14266
+✓ 6 steps
+    ✓ Initialize containers
+    ✓ Run actions/checkout@v4.2.0
+    ✗ Run all tests (unit + integration)
+    ...
+```
+
+- All text small; every message starts with `[workflow name][job name]`, then branch · commit.
+- Verdict line: `✓ N steps` (green) or `✗ N steps · M failed` (red), followed by each step with its own symbol (✓ / ✗ / ✗ orange cancelled / ⏭ skipped).
+- The reporter's own steps and the runner's auto steps are never shown.
+
+## Panel selection
+
+`panel-id` (explicit) → else: on the `prd-branch` (default `main`) → `prd-panel` (default 1), any other branch → `dev-panel` (default 2).
+
+Each push overwrites the same panel — the board keeps only the latest message.
+
+## Inputs
+
+| Input | Default | Notes |
 |---|---|---|
-| `phase` | ✓ `start`\|`end` | start = first step of the job; end = last step, `if: always()` |
-| `api-key` | optional | Falls back to `env.PUSH_TO_DISPLAY_API_KEY` (workflow- or job-level) |
-| `board-id` | optional | Falls back to `env.PUSH_TO_DISPLAY_BOARD`; omit to use the account's default board |
-| `api-url` | optional | Default `https://api.pushtodisplay.com` |
-| `panel-id` | optional | Explicit panel ID (1–4), overrides branch-based resolution |
-| `prd-panel` / `dev-panel` | optional | Panels for prd / other branches (defaults 1 / 2) |
-| `prd-branch` | optional | Branch treated as production (default `main`) |
-| `label` | optional | Label shown on the board (defaults to the workflow name) |
+| `steps-json` | — | `${{ toJSON(steps) }}` — required for meaningful output; without it only run metadata is pushed (warning logged) |
+| `api-key` | `PUSH_TO_DISPLAY_API_KEY` | |
+| `api-url` | `https://api.pushtodisplay.com` | override for self-hosted |
+| `board-id` | `PUSH_TO_DISPLAY_BOARD` | defaults to the account board |
+| `panel-id` | — | overrides branch-based selection |
+| `prd-panel` | `1` | |
+| `dev-panel` | `2` | |
+| `prd-branch` | `main` | |
+| `label` | workflow name | |
 
-## How it works
+## Failure behavior
 
-- **`phase: start`** — a "[workflow][job]" banner, built from runner env only (no GitHub API call).
-- **`phase: end`** — reads the run's jobs and steps from the GitHub Actions API (via `GITHUB_TOKEN`) and renders a full snapshot: every job, the own job expanded step-by-step, failed steps of other failed jobs.
-- **`steps-json`** — the own job's exact result: pass `${{ toJSON(steps) }}` so the action uses the caller's `steps` context (computed by GitHub itself) instead of inferring the job's conclusion. Without it the action falls back to API-derived data and logs a warning.
-- The own job's result is derived from its step conclusions (the job is still `in_progress` in the API while the report step runs).
-- Matrix/matrix-templated job names render as `(matrix)`, each leg reports independently.
-
-## Cost & bounds
-
-- **Start**: zero GitHub API calls + 1 POST. **End**: 1 GitHub API call + 1 POST.
-- Everything is time-boxed inside the action (30s bound) and **fail-soft**: any error becomes a warning annotation and a small fallback block — the workflow never turns red because of reporting.
-
-## Notes
-
-- The **end** report must be the **last step** of the job, with `if: always()`.
-- Cancelled mid-job runs end at the last completed report (a cancelled job's remaining steps don't run).
-- No `permissions:` block needed: the default `GITHUB_TOKEN` can read run jobs. If a 403 appears, the fallback block explains how to add `permissions: actions: read`.
+The action never fails a workflow. Missing key, bad key, board API down, timeouts — all become a `::warning::` line and a clean exit 0. Requests are time-boxed (30s), no retries. Missing `steps-json` warns and pushes run metadata only.
