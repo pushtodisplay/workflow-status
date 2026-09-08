@@ -47,6 +47,7 @@ jobs:
         uses: pushtodisplay/workflow-status@v1
         with:
           phase: end
+          steps-json: ${{ toJSON(steps) }}
 ```
 
 ### Inputs
@@ -65,7 +66,8 @@ jobs:
 ## How it works
 
 - **`phase: start`** — a "[workflow][job]" banner, built from runner env only (no GitHub API call).
-- **`phase: end`** — reads the run's jobs and steps from the GitHub Actions API (via `GITHUB_TOKEN`) and renders a full snapshot: every job, the own job expanded step-by-step (its result derived from step conclusions), failed steps of other failed jobs.
+- **`phase: end`** — reads the run's jobs and steps from the GitHub Actions API (via `GITHUB_TOKEN`) and renders a full snapshot: every job, the own job expanded step-by-step, failed steps of other failed jobs.
+- **`steps-json`** — the own job's exact result: pass `${{ toJSON(steps) }}` so the action uses the caller's `steps` context (computed by GitHub itself) instead of inferring the job's conclusion. Without it the action falls back to API-derived data and logs a warning.
 - The own job's result is derived from its step conclusions (the job is still `in_progress` in the API while the report step runs).
 - Matrix/matrix-templated job names render as `(matrix)`, each leg reports independently.
 

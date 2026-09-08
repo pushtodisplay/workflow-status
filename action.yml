@@ -38,6 +38,9 @@ inputs:
   label:
     description: "Label shown on the board. Defaults to the workflow name."
     required: false
+  steps-json:
+    description: "Serialized steps context of the calling job (toJSON(steps)). Used by phase: end for the own job's exact conclusion, as computed by GitHub."
+    required: false
 
 outputs:
   panel-id:

@@ -100,9 +100,37 @@ function isAutoStep(name) {
   );
 }
 
+// Exact own-job verdict from the caller's steps context (GitHub-computed).
+// The workflow passes it as steps-json (= toJSON(steps)); the action's JS
+// cannot evaluate workflow expressions itself, so the caller provides the
+// evaluation. Returns null when unavailable.
+function ownConclusionFromStepsJson() {
+  const raw = input("steps-json");
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const terminal = Object.values(parsed)
+    .map((s) => (s && (s.conclusion || s.outcome)) || null)
+    .filter(
+      (c) =>
+        c === "success" ||
+        c === "failure" ||
+        c === "cancelled" ||
+        c === "skipped",
+    );
+  if (terminal.length === 0) return null;
+  return terminal.some((c) => c === "failure" || c === "cancelled")
+    ? "failure"
+    : "success";
+}
+
 // Derive the own job's conclusion: while this report step runs, the API still
 // reports the job as in_progress, but every previous (user) step already has
-// its final conclusion.
+// its final conclusion. Fallback only when steps-json is unavailable.
 function deriveOwnConclusion(ownJob) {
   const steps = (ownJob.steps ?? []).filter(
     (s) => !isAutoStep(s.name) && s.status === "completed",
@@ -212,8 +240,22 @@ async function endBlocks() {
     (a.started_at ?? "").localeCompare(b.started_at ?? ""),
   );
 
+  const ownJob = jobs.find((j) => j.name === selfJob);
+  let ownConclusion = null;
+  if (ownJob) {
+    ownConclusion = ownConclusionFromStepsJson();
+    if (ownConclusion === null) {
+      ownConclusion = deriveOwnConclusion(ownJob);
+      warn(
+        "steps-json not provided on this end report; own-job result derived from API step data — pass steps-json: ${{ toJSON(steps) }} for the exact result",
+      );
+    }
+  }
+
   const blocks = [];
-  const okCount = jobs.filter((j) => j.conclusion === "success").length;
+  const okCount =
+    jobs.filter((j) => j.conclusion === "success").length +
+    (ownConclusion === "success" ? 1 : 0);
   const firstStart = jobs.find((j) => j.started_at)?.started_at;
   const started = firstStart ? `\u00b7 started ${fmtUtc(firstStart)}` : "";
   blocks.push({ text: `[${label}][${selfJob}]`, size: "small" });
@@ -233,8 +275,7 @@ async function endBlocks() {
     let style = jobStyle(job);
     let duration = fmtDuration(job.started_at, job.completed_at);
     if (own) {
-      const conclusion = deriveOwnConclusion(job);
-      style = JOB_STYLES[conclusion];
+      style = JOB_STYLES[ownConclusion ?? deriveOwnConclusion(job)];
       duration = fmtDuration(job.started_at, new Date().toISOString());
     }
     blocks.push({

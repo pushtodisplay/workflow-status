@@ -25,3 +25,4 @@ jobs:
         uses: ./
         with:
           phase: end
+          steps-json: ${{ toJSON(steps) }}
