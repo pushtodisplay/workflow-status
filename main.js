@@ -256,8 +256,18 @@ async function endBlocks() {
   const okCount =
     jobs.filter((j) => j.conclusion === "success").length +
     (ownConclusion === "success" ? 1 : 0);
+  const finishedCount =
+    jobs.filter((j) => j.conclusion !== null && j.conclusion !== undefined)
+      .length + (ownJob ? 1 : 0);
+  const runningCount = jobs.filter(
+    (j) => j.status === "in_progress" && j !== ownJob,
+  ).length;
+  const queuedCount = jobs.filter((j) => j.status === "queued").length;
   const firstStart = jobs.find((j) => j.started_at)?.started_at;
   const started = firstStart ? `\u00b7 started ${fmtUtc(firstStart)}` : "";
+  let summary = `${okCount}/${finishedCount} jobs ok`;
+  if (runningCount) summary += ` \u00b7 ${runningCount} running`;
+  if (queuedCount) summary += ` \u00b7 ${queuedCount} queued`;
   blocks.push({ text: `[${label}][${selfJob}]`, size: "small" });
   blocks.push({
     text: `${branch} \u00b7 ${sha}`,
@@ -265,7 +275,7 @@ async function endBlocks() {
     color: "#9ca3af",
   });
   blocks.push({
-    text: `${okCount}/${jobs.length} jobs ok ${started}`.trim(),
+    text: `${summary} ${started}`.trim(),
     size: "small",
     color: "#9ca3af",
   });
