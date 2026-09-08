@@ -60,6 +60,16 @@ function fmtSecs(secs) {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+function fmtUtc(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, "0");
+  return (
+    `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ` +
+    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`
+  );
+}
+
 const JOB_STYLES = {
   success: { sym: "\u2713", color: "#22c55e" }, // ✓ green
   failure: { sym: "\u2717", color: "#ef4444" }, // ✗ red
@@ -183,8 +193,8 @@ async function listJobs(repo, runId, attempt, token) {
 
 function startBlocks() {
   return [
-    { text: `\u{1F680} ${label} started`, size: "large", weight: "bold" },
-    { text: `${branch} \u00b7 ${sha}`, size: "medium", color: "#9ca3af" },
+    { text: `[${label}][${selfJob}]`, size: "small" },
+    { text: `${branch} \u00b7 ${sha}`, size: "small", color: "#9ca3af" },
   ];
 }
 
@@ -205,12 +215,15 @@ async function endBlocks() {
   const blocks = [];
   const okCount = jobs.filter((j) => j.conclusion === "success").length;
   const firstStart = jobs.find((j) => j.started_at)?.started_at;
-  const ago = firstStart
-    ? `\u00b7 started ${fmtSecs(Math.max(0, Math.round((Date.now() - Date.parse(firstStart)) / 1000)))} ago`
-    : "";
-  blocks.push({ text: `${label} \u00b7 ${branch} \u00b7 ${sha}`, size: "small" });
+  const started = firstStart ? `\u00b7 started ${fmtUtc(firstStart)}` : "";
+  blocks.push({ text: `[${label}][${selfJob}]`, size: "small" });
   blocks.push({
-    text: `${okCount}/${jobs.length} jobs ok ${ago}`.trim(),
+    text: `${branch} \u00b7 ${sha}`,
+    size: "small",
+    color: "#9ca3af",
+  });
+  blocks.push({
+    text: `${okCount}/${jobs.length} jobs ok ${started}`.trim(),
     size: "small",
     color: "#9ca3af",
   });
@@ -228,6 +241,7 @@ async function endBlocks() {
       text: `${style.sym} ${displayName(job.name)}${
         own ? " (this job)" : ""
       }${duration ? ` \u00b7 ${duration}` : ""}`,
+      size: "small",
       color: style.color,
     });
 

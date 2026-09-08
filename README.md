@@ -3,7 +3,7 @@
 Live per-job reporting for your [Push to Display](https://pushtodisplay.com) board. Add two lines to every job and your board fills in as the run progresses:
 
 ```
-🚀 Backend Pipeline started
+[Backend Pipeline][detect-changes]
 dev · abc1234
 ```
 
@@ -11,7 +11,7 @@ dev · abc1234
 
 ```
 Backend Pipeline · dev · abc1234
-2/4 jobs ok · started 11m ago
+2/4 jobs ok · started 2026-09-08 02:43:06 UTC
 ✓ detect-changes · 12s
 ✗ build-and-test (this job) · 10m 51s
   ✓ Initialize containers
@@ -64,7 +64,7 @@ jobs:
 
 ## How it works
 
-- **`phase: start`** — a "🚀 \<workflow\> started" banner, built from runner env only (no GitHub API call).
+- **`phase: start`** — a "[workflow][job]" banner, built from runner env only (no GitHub API call).
 - **`phase: end`** — reads the run's jobs and steps from the GitHub Actions API (via `GITHUB_TOKEN`) and renders a full snapshot: every job, the own job expanded step-by-step (its result derived from step conclusions), failed steps of other failed jobs.
 - The own job's result is derived from its step conclusions (the job is still `in_progress` in the API while the report step runs).
 - Matrix/matrix-templated job names render as `(matrix)`, each leg reports independently.
