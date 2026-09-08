@@ -25,14 +25,15 @@ Built on [`pushtodisplay/action`](https://github.com/pushtodisplay/action): this
 
 ## Usage
 
-Set an `env` line per job (or pass `api-key` / `board-id` per step), then add a **start** report as the first step and an **end** report as the last step:
+Declare the credentials once at the workflow level (they are inherited by every job), then add a **start** report as each job's first step and an **end** report as its last step:
 
 ```yaml
+env:
+  PUSH_TO_DISPLAY_API_KEY: ${{ secrets.PUSH_TO_DISPLAY_API_KEY }}
+  PUSH_TO_DISPLAY_BOARD: ${{ vars.PUSH_TO_DISPLAY_BOARD }}
+
 jobs:
   build-and-test:
-    env:                                              # one line per job
-      PUSH_TO_DISPLAY_API_KEY: ${{ secrets.PUSH_TO_DISPLAY_API_KEY }}
-      PUSH_TO_DISPLAY_BOARD: ${{ vars.PUSH_TO_DISPLAY_BOARD }}
     steps:
       - name: Report to display (start)
         uses: pushtodisplay/workflow-status@v1
@@ -52,8 +53,8 @@ jobs:
 | Input | Required | Purpose |
 |---|---|---|
 | `phase` | ✓ `start`\|`end` | start = first step of the job; end = last step, `if: always()` |
-| `api-key` | optional | Falls back to job env `PUSH_TO_DISPLAY_API_KEY` |
-| `board-id` | optional | Falls back to job env `PUSH_TO_DISPLAY_BOARD`; omit to use the account's default board |
+| `api-key` | optional | Falls back to `env.PUSH_TO_DISPLAY_API_KEY` (workflow- or job-level) |
+| `board-id` | optional | Falls back to `env.PUSH_TO_DISPLAY_BOARD`; omit to use the account's default board |
 | `api-url` | optional | Default `https://api.pushtodisplay.com` |
 | `panel-id` | optional | Explicit panel ID (1–4), overrides branch-based resolution |
 | `prd-panel` / `dev-panel` | optional | Panels for prd / other branches (defaults 1 / 2) |
