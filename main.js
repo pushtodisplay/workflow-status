@@ -8,10 +8,11 @@
  *
  * No GitHub API, no GITHUB_TOKEN, no permissions needed. The job's own
  * step results come from the calling workflow's steps context, passed as
- * steps-json = ${{ toJSON(steps) }} and computed by GitHub itself.
+ * steps-json = toJSON(steps) and computed by GitHub itself.
  *
- * Fails soft: any error emits an annotation warning; process exits 0 — the
- * workflow result is never affected. No dependencies, no retries, 30s bound.
+ * Fails soft: any error emits an annotation warning; the process exits 0 —
+ * the workflow result is never affected. No dependencies, no retries, 30s
+ * bound on the one request the action makes (to Push to Display).
  *
  * Reads inputs from INPUT_* env (set by the runner from action.yml inputs):
  *   INPUT_STEPS_JSON, INPUT_API_KEY, INPUT_API_URL, INPUT_BOARD_ID,
@@ -44,22 +45,34 @@ function writeOutput(name, value) {
   appendFileSync(out, `${name}<<PTD_EOF\n${value}\nPTD_EOF\n`);
 }
 
-// ---------- inputs ----------
+// ---------- run facts (lazy: tests and runners may set env late) ----------
 
-const label = input("label") || env.GITHUB_WORKFLOW || "workflow";
-const ref = env.GITHUB_REF || "";
-const branch =
-  env.GITHUB_HEAD_REF ||
-  env.GITHUB_REF_NAME ||
-  (ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref);
-const sha = (env.GITHUB_SHA || "").slice(0, 7);
-const selfJob = env.GITHUB_JOB || "";
+function getLabel() {
+  return input("label") || env.GITHUB_WORKFLOW || "workflow";
+}
+
+function getBranch() {
+  const ref = env.GITHUB_REF || "";
+  return (
+    env.GITHUB_HEAD_REF ||
+    env.GITHUB_REF_NAME ||
+    (ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref)
+  );
+}
+
+function getSha() {
+  return (env.GITHUB_SHA || "").slice(0, 7);
+}
+
+function getSelfJob() {
+  return env.GITHUB_JOB || "";
+}
 
 function resolvePanel() {
   const override = input("panel-id");
   if (override) return override;
   const prdBranch = input("prd-branch") || "main";
-  return ref === `refs/heads/${prdBranch}`
+  return env.GITHUB_REF === `refs/heads/${prdBranch}`
     ? input("prd-panel") || "1"
     : input("dev-panel") || "2";
 }
@@ -108,8 +121,12 @@ function parseStepsJson() {
 
 function bannerBlocks() {
   return [
-    { text: `[${label}][${selfJob}]`, size: "small" },
-    { text: `${branch} \u00b7 ${sha}`, size: "small", color: "#9ca3af" },
+    { text: `[${getLabel()}][${getSelfJob()}]`, size: "small" },
+    {
+      text: `${getBranch()} \u00b7 ${getSha()}`,
+      size: "small",
+      color: "#9ca3af",
+    },
   ];
 }
 
@@ -146,8 +163,12 @@ function buildBlocks() {
   const color = failed.length ? "#ef4444" : "#22c55e";
 
   const blocks = [
-    { text: `[${label}][${selfJob}]`, size: "small" },
-    { text: `${branch} \u00b7 ${sha}`, size: "small", color: "#9ca3af" },
+    { text: `[${getLabel()}][${getSelfJob()}]`, size: "small" },
+    {
+      text: `${getBranch()} \u00b7 ${getSha()}`,
+      size: "small",
+      color: "#9ca3af",
+    },
     {
       text: `${sym} ${terminal.length} steps${
         failed.length ? ` \u00b7 ${failed.length} failed` : ""
@@ -178,8 +199,7 @@ function buildBlocks() {
 
 async function pushToDisplay(panelId, blocks) {
   const apiUrl = input("api-url") || "https://api.pushtodisplay.com";
-  const apiKey =
-    input("api-key") || env.PUSH_TO_DISPLAY_API_KEY || "";
+  const apiKey = input("api-key") || env.PUSH_TO_DISPLAY_API_KEY || "";
   const boardId = input("board-id") || env.PUSH_TO_DISPLAY_BOARD || "";
   if (!apiKey) {
     warn(
@@ -223,9 +243,12 @@ async function pushToDisplay(panelId, blocks) {
 
 // ---------- main ----------
 
-(async () => {
+// Never throws, never exits non-zero: the workflow result is untouched.
+async function run() {
+  process.exitCode = 0;
+  let panelId;
   try {
-    const panelId = resolvePanel();
+    panelId = resolvePanel();
     const blocks = buildBlocks();
     writeOutput("panel-id", panelId);
     try {
@@ -234,11 +257,31 @@ async function pushToDisplay(panelId, blocks) {
       // The push failing never fails the workflow.
       warn(pushErr.message);
     }
-    process.exit(0);
   } catch (err) {
     warn(err.message);
-    const panelId = resolvePanel();
+    panelId = resolvePanel();
     writeOutput("panel-id", panelId);
-    process.exit(0);
   }
-})();
+}
+
+if (require.main === module) {
+  run().finally(() => process.exit(0));
+}
+
+module.exports = {
+  warn,
+  input,
+  writeOutput,
+  getLabel,
+  getBranch,
+  getSha,
+  getSelfJob,
+  resolvePanel,
+  isHiddenStep,
+  displayStepName,
+  parseStepsJson,
+  bannerBlocks,
+  buildBlocks,
+  pushToDisplay,
+  run,
+};
