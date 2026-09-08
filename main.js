@@ -116,10 +116,20 @@ function displayStepName(key) {
 
 function parseStepsJson() {
   const raw = input("steps-json");
-  if (!raw) return null;
+  if (!raw) {
+    console.log("Push to Display: steps-json input (empty)");
+    return null;
+  }
   try {
-    return JSON.parse(raw);
-  } catch {
+    const parsed = JSON.parse(raw);
+    console.log(
+      `Push to Display: steps-json input (${raw.length} chars): ${raw}`,
+    );
+    return parsed;
+  } catch (error) {
+    console.log(
+      `Push to Display: unparsable steps-json input (${raw.length} chars): ${raw}`,
+    );
     return null;
   }
 }
@@ -214,6 +224,10 @@ async function pushToDisplay(panelId, blocks) {
   }
 
   const url = `${apiUrl}/v1/updates`;
+  const payload = { boardId, panelId, blocks };
+  console.log(
+    `Push to Display: payload to send → ${url}: ${JSON.stringify(payload)}`,
+  );
   let response;
   try {
     response = await fetch(url, {
@@ -223,7 +237,7 @@ async function pushToDisplay(panelId, blocks) {
         Accept: "application/json",
         "X-Api-Key": apiKey,
       },
-      body: JSON.stringify({ boardId, panelId, blocks }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
