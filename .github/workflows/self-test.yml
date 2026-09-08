@@ -6,7 +6,9 @@ on:
   pull_request:
 
 jobs:
-  self-test:
+  # Exercises every position of the unified report step:
+  # first -> banner, middle -> progress record, last -> final record.
+  happy-path:
     runs-on: ubuntu-latest
     env:
       PUSH_TO_DISPLAY_API_KEY: ${{ secrets.PUSH_TO_DISPLAY_API_KEY }}
@@ -17,8 +19,35 @@ jobs:
         uses: ./
         with:
           steps-json: ${{ toJSON(steps) }}
-      - name: Simulated work
-        run: echo "do some work"
+      - name: Simulated work 1
+        run: echo "doing some work"
+      - name: Report to display (middle)
+        uses: ./
+        with:
+          steps-json: ${{ toJSON(steps) }}
+      - name: Simulated work 2
+        run: echo "doing more work"
+      - name: Report to display (end)
+        if: always()
+        uses: ./
+        with:
+          steps-json: ${{ toJSON(steps) }}
+
+  # This job fails ON PURPOSE: it proves the record still reaches the board
+  # after a step failure (if: always()), rendered with the failed step in red.
+  failure-path:
+    runs-on: ubuntu-latest
+    env:
+      PUSH_TO_DISPLAY_API_KEY: ${{ secrets.PUSH_TO_DISPLAY_API_KEY }}
+      PUSH_TO_DISPLAY_BOARD: ${{ vars.PUSH_TO_DISPLAY_BOARD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report to display (start)
+        uses: ./
+        with:
+          steps-json: ${{ toJSON(steps) }}
+      - name: Intentionally fail
+        run: echo "this step is meant to fail" && exit 1
       - name: Report to display (end)
         if: always()
         uses: ./
