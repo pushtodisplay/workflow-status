@@ -1,0 +1,26 @@
+name: Self test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    env:
+      PUSH_TO_DISPLAY_API_KEY: ${{ secrets.PUSH_TO_DISPLAY_API_KEY }}
+      PUSH_TO_DISPLAY_BOARD: ${{ vars.PUSH_TO_DISPLAY_BOARD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report to display (start)
+        uses: ./
+        with:
+          phase: start
+      - name: Simulated work
+        run: echo "do some work"
+      - name: Report to display (end)
+        if: always()
+        uses: ./
+        with:
+          phase: end
