@@ -8,7 +8,7 @@ branding:
 
 inputs:
   steps-json:
-    description: "Serialized steps context of the calling job: ${{ toJSON(steps) }}. Empty means the step is first (job started banner); otherwise the job's record with every completed step."
+    description: "Serialized steps context of the calling job (the workflow passes toJSON(steps)). An empty steps context means the step is first — job started banner; otherwise the job's record with every completed step."
     required: false
   api-key:
     description: "API key for authentication. Optional when the workflow or job sets env PUSH_TO_DISPLAY_API_KEY."
