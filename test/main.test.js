@@ -23,12 +23,21 @@ const ENV_PREFIXES = /^(INPUT_|GITHUB_|PUSH_TO_DISPLAY_)/;
 const BACKGROUND = "#2c3e50";
 
 const META = [
-  { text: "dev · abcdef1", size: "small", color: "#aab7b8" },
+  { text: "dev", size: "small", color: "#85c1e9" },
   { text: "[Backend Pipeline]", size: "small", color: "#e6a8be" },
   { text: "[build-and-test]", size: "small", color: "#cfe6a8" },
+  { text: "abcdef1", size: "small", color: "#aab7b8" },
 ];
 
-const statusOf = (blocks) => blocks[blocks.length - 1];
+const statusOf = (blocks) => blocks[blocks.length - 2];
+const stripTime = (blocks) => blocks.slice(0, -1);
+
+function assertTimestamp(blocks) {
+  const last = blocks[blocks.length - 1];
+  assert.match(last.text, /^\d{2}:\d{2}:\d{2} [A-Z][a-z]{2} \d{2} UTC$/);
+  assert.strictEqual(last.size, "small");
+  assert.strictEqual(last.color, "#aab7b8");
+}
 
 function resetEnv() {
   for (const key of Object.keys(process.env)) {
@@ -141,6 +150,26 @@ test("every possible name color clears 4.5:1 on the background", () => {
   );
 });
 
+test("branch color follows the sendnotification env convention", () => {
+  setEnv({ GITHUB_REF: "refs/heads/main", GITHUB_REF_NAME: "main" });
+  assert.strictEqual(action.branchColor(), "#2ecc71");
+  setEnv({ GITHUB_REF: "refs/heads/stg", GITHUB_REF_NAME: "stg" });
+  assert.strictEqual(action.branchColor(), "#f5b041");
+  setEnv({ GITHUB_REF: "refs/heads/dev", GITHUB_REF_NAME: "dev" });
+  assert.strictEqual(action.branchColor(), "#85c1e9");
+  setEnv({ GITHUB_REF: "refs/heads/copilot/x", GITHUB_REF_NAME: "copilot/x" });
+  assert.strictEqual(action.branchColor(), "#aab7b8");
+});
+
+test("branch color honors a custom prd-branch", () => {
+  setEnv({
+    GITHUB_REF: "refs/heads/prod",
+    GITHUB_REF_NAME: "prod",
+    "INPUT_PRD-BRANCH": "prod",
+  });
+  assert.strictEqual(action.branchColor(), "#2ecc71");
+});
+
 test("status palette clears 4.5:1 on the background", () => {
   for (const hex of [
     "#e8e8e8",
@@ -155,14 +184,44 @@ test("status palette clears 4.5:1 on the background", () => {
   }
 });
 
+test("timestamp: sendnotification format, pinned to UTC", () => {
+  assert.strictEqual(
+    action.utcTimestamp(new Date("2026-09-09T09:17:53.549Z")),
+    "09:17:53 Sep 09 UTC",
+  );
+  assert.strictEqual(
+    action.utcTimestamp(new Date("2026-01-01T00:00:00Z")),
+    "00:00:00 Jan 01 UTC",
+  );
+});
+
+test("timestamp is UTC regardless of the runner timezone", () => {
+  const original = process.env.TZ;
+  try {
+    for (const tz of ["America/New_York", "Asia/Tokyo", "UTC"]) {
+      process.env.TZ = tz;
+      assert.strictEqual(
+        action.utcTimestamp(new Date("2026-09-09T09:17:53Z")),
+        "09:17:53 Sep 09 UTC",
+        `failed under TZ=${tz}`,
+      );
+    }
+  } finally {
+    if (original === undefined) delete process.env.TZ;
+    else process.env.TZ = original;
+  }
+});
+
 // ---------- status rendering ----------
 
 test("first position (empty steps context): started", () => {
   setEnv({ "INPUT_STEPS-JSON": "{}" });
-  assert.deepStrictEqual(action.buildBlocks(), [
+  const blocks = action.buildBlocks();
+  assert.deepStrictEqual(stripTime(blocks), [
     ...META,
     { text: "\u25cf started", size: "small", color: "#85c1e9" },
   ]);
+  assertTimestamp(blocks);
 });
 
 test("services job at first position: container UUID step is hidden, still started", () => {
@@ -175,7 +234,7 @@ test("services job at first position: container UUID step is hidden, still start
       },
     }),
   });
-  assert.deepStrictEqual(action.buildBlocks(), [
+  assert.deepStrictEqual(stripTime(action.buildBlocks()), [
     ...META,
     { text: "\u25cf started", size: "small", color: "#85c1e9" },
   ]);
@@ -189,10 +248,12 @@ test("all steps succeeded: done", () => {
       test: { conclusion: "success" },
     }),
   });
-  assert.deepStrictEqual(action.buildBlocks(), [
+  const blocks = action.buildBlocks();
+  assert.deepStrictEqual(stripTime(blocks), [
     ...META,
     { text: "\u2713 done", size: "small", color: "#2ecc71" },
   ]);
+  assertTimestamp(blocks);
 });
 
 test("skipped steps do not fail the job: done", () => {
@@ -216,7 +277,7 @@ test("mocked always(): failed steps are named in the status line", () => {
       deploy: { conclusion: "skipped" },
     }),
   });
-  assert.deepStrictEqual(action.buildBlocks(), [
+  assert.deepStrictEqual(stripTime(action.buildBlocks()), [
     ...META,
     {
       text: "\u2717 failed \u00b7 build, test",
@@ -233,7 +294,7 @@ test("mocked always(): cancelled steps render amber", () => {
       "build-and-push": { conclusion: "cancelled" },
     }),
   });
-  assert.deepStrictEqual(action.buildBlocks(), [
+  assert.deepStrictEqual(stripTime(action.buildBlocks()), [
     ...META,
     {
       text: "\u2717 cancelled \u00b7 build-and-push",
@@ -260,7 +321,7 @@ test("progress input: mid-job report says in progress", () => {
     "INPUT_STEPS-JSON": JSON.stringify({ checkout: { conclusion: "success" } }),
     "INPUT_PROGRESS": "true",
   });
-  assert.deepStrictEqual(action.buildBlocks(), [
+  assert.deepStrictEqual(stripTime(action.buildBlocks()), [
     ...META,
     { text: "\u25cf in progress", size: "small", color: "#85c1e9" },
   ]);
@@ -319,7 +380,9 @@ test("outcome is honored when conclusion is absent", () => {
 test("missing steps-json warns and pushes metadata only", () => {
   const cap = captureLogs();
   try {
-    assert.deepStrictEqual(action.buildBlocks(), META);
+    const blocks = action.buildBlocks();
+    assert.deepStrictEqual(stripTime(blocks), META);
+    assertTimestamp(blocks);
     assert.ok(
       cap.logs.some((l) => l.includes("steps-json missing")),
       "expected a warning about steps-json",
@@ -333,7 +396,7 @@ test("unparsable steps-json warns and pushes metadata only", () => {
   setEnv({ "INPUT_STEPS-JSON": "{nope" });
   const cap = captureLogs();
   try {
-    assert.deepStrictEqual(action.buildBlocks(), META);
+    assert.deepStrictEqual(stripTime(action.buildBlocks()), META);
     assert.ok(cap.logs.some((l) => l.includes("steps-json missing")));
   } finally {
     cap.restore();

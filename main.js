@@ -44,11 +44,36 @@ const COLOR = {
 };
 const BACKGROUND = "#2c3e50";
 
+// Branch name color follows the sendnotification env convention (stg amber,
+// prd green, dev blue, anything else gray), lightened where needed to clear
+// 4.5:1 on the background. "prd" = the prd-branch input (default main).
+const ENV_COLOR = {
+  prd: "#2ecc71", // 5.23:1
+  stg: "#f5b041", // 5.84:1
+  dev: "#85c1e9", // 5.65:1
+  other: "#aab7b8", // 5.32:1
+};
+
 // Workflow/job names get a deterministic color: FNV-1a hash → hue, with
 // saturation/lightness fixed so EVERY hue clears 4.5:1 on the background
 // (worst hue 240 = 4.92:1). Same name → same color, on any machine, forever.
 const NAME_SATURATION = 0.55;
 const NAME_LIGHTNESS = 0.78;
+
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
 
 // ---------- helpers ----------
 
@@ -111,6 +136,13 @@ function nameColor(name) {
   );
 }
 
+// sendnotification timestamp format (HH:MM:SS Mon DD), pinned to UTC.
+function utcTimestamp(now = new Date()) {
+  const [date, time] = now.toISOString().split("T");
+  const [, month, day] = date.split("-");
+  return `${time.slice(0, 8)} ${MONTHS[Number(month) - 1]} ${day} UTC`;
+}
+
 function writeOutput(name, value) {
   const out = env.GITHUB_OUTPUT;
   if (!out) return;
@@ -147,6 +179,14 @@ function resolvePanel() {
   return env.GITHUB_REF === `refs/heads/${prdBranch}`
     ? input("prd-panel") || "1"
     : input("dev-panel") || "2";
+}
+
+function branchColor() {
+  const branch = getBranch();
+  if (branch === (input("prd-branch") || "main")) return ENV_COLOR.prd;
+  if (branch === "stg") return ENV_COLOR.stg;
+  if (branch === "dev") return ENV_COLOR.dev;
+  return ENV_COLOR.other;
 }
 
 // ---------- own-job status ----------
@@ -198,16 +238,16 @@ function parseStepsJson() {
   }
 }
 
-// Every message: branch · sha, then the workflow and the job — each name
-// carries its own deterministic hash color.
+// Every message: branch (env color), workflow and job (hash colors), then
+// the commit hash to the right of the job name.
 function metaBlocks() {
   const label = getLabel();
   const job = getSelfJob();
   return [
     {
-      text: `${getBranch()} \u00b7 ${getSha()}`,
+      text: getBranch(),
       size: "small",
-      color: COLOR.muted,
+      color: branchColor(),
     },
     {
       text: `[${label}]`,
@@ -219,7 +259,16 @@ function metaBlocks() {
       size: "small",
       color: nameColor(job),
     },
+    {
+      text: getSha(),
+      size: "small",
+      color: COLOR.muted,
+    },
   ];
+}
+
+function timeBlock() {
+  return { text: utcTimestamp(), size: "small", color: COLOR.muted };
 }
 
 function buildBlocks() {
@@ -228,7 +277,7 @@ function buildBlocks() {
     warn(
       "steps-json missing or unparsable — pass with: steps-json: ${{ toJSON(steps) }}; only run metadata pushed",
     );
-    return metaBlocks();
+    return [...metaBlocks(), timeBlock()];
   }
 
   const terminal = Object.entries(stepsJson)
@@ -271,7 +320,11 @@ function buildBlocks() {
     status = { text: "\u2713 done", color: COLOR.ok };
   }
 
-  return [...metaBlocks(), { text: status.text, size: "small", color: status.color }];
+  return [
+    ...metaBlocks(),
+    { text: status.text, size: "small", color: status.color },
+    timeBlock(),
+  ];
 }
 
 // ---------- Push to Display API ----------
@@ -358,12 +411,15 @@ module.exports = {
   hash32,
   hslToHex,
   nameColor,
+  utcTimestamp,
+  timeBlock,
   writeOutput,
   getLabel,
   getBranch,
   getSha,
   getSelfJob,
   resolvePanel,
+  branchColor,
   isHiddenStep,
   displayStepName,
   parseStepsJson,
