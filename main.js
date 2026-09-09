@@ -32,16 +32,23 @@ const { appendFileSync } = require("node:fs");
 const env = process.env;
 const REQUEST_TIMEOUT_MS = 30_000; // the action owns its own bound
 
-// Palette mirrors compose/stg/utils/sendnotification (same flat-UI family).
+// Palette mirrors compose/stg/utils/sendnotification (same flat-UI family),
+// with every color verified ≥ 4.5:1 contrast on the #2c3e50 background.
 const COLOR = {
-  text: "#e8e8e8", // message text
-  muted: "#7f8c8d", // timestamp / branch · sha
-  ok: "#2ecc71", // green — done
-  fail: "#e74c3c", // red — failed
-  warn: "#f5b041", // amber — cancelled
-  running: "#5dade2", // blue — started / in progress
+  text: "#e8e8e8", // message text — 8.96:1
+  muted: "#aab7b8", // branch · sha — 5.32:1
+  ok: "#2ecc71", // green — done — 5.23:1
+  fail: "#f1948a", // red — failed — 4.89:1
+  warn: "#f5b041", // amber — cancelled — 5.84:1
+  running: "#85c1e9", // blue — started / in progress — 5.65:1
 };
 const BACKGROUND = "#2c3e50";
+
+// Workflow/job names get a deterministic color: FNV-1a hash → hue, with
+// saturation/lightness fixed so EVERY hue clears 4.5:1 on the background
+// (worst hue 240 = 4.92:1). Same name → same color, on any machine, forever.
+const NAME_SATURATION = 0.55;
+const NAME_LIGHTNESS = 0.78;
 
 // ---------- helpers ----------
 
@@ -61,6 +68,47 @@ function input(name) {
 
 function isTruthy(value) {
   return /^(1|true|yes|on)$/i.test((value || "").trim());
+}
+
+// FNV-1a 32-bit over the lowercased name — stable across runs and machines.
+function hash32(name) {
+  let h = 0x811c9dc5;
+  for (const ch of name.toLowerCase()) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+function hslToHex(h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const [r, g, b] =
+    h < 60
+      ? [c, x, 0]
+      : h < 120
+        ? [x, c, 0]
+        : h < 180
+          ? [0, c, x]
+          : h < 240
+            ? [0, x, c]
+            : h < 300
+              ? [x, 0, c]
+              : [c, 0, x];
+  const to = (v) =>
+    Math.round((v + m) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${to(r)}${to(g)}${to(b)}`;
+}
+
+function nameColor(name) {
+  return hslToHex(
+    hash32(name) % 360,
+    NAME_SATURATION,
+    NAME_LIGHTNESS,
+  );
 }
 
 function writeOutput(name, value) {
@@ -150,8 +198,11 @@ function parseStepsJson() {
   }
 }
 
-// Every message: branch · sha first, then [workflow][job].
+// Every message: branch · sha, then the workflow and the job — each name
+// carries its own deterministic hash color.
 function metaBlocks() {
+  const label = getLabel();
+  const job = getSelfJob();
   return [
     {
       text: `${getBranch()} \u00b7 ${getSha()}`,
@@ -159,9 +210,14 @@ function metaBlocks() {
       color: COLOR.muted,
     },
     {
-      text: `[${getLabel()}][${getSelfJob()}]`,
+      text: `[${label}]`,
       size: "small",
-      color: COLOR.text,
+      color: nameColor(label),
+    },
+    {
+      text: `[${job}]`,
+      size: "small",
+      color: nameColor(job),
     },
   ];
 }
@@ -299,6 +355,9 @@ module.exports = {
   warn,
   input,
   isTruthy,
+  hash32,
+  hslToHex,
+  nameColor,
   writeOutput,
   getLabel,
   getBranch,

@@ -50,7 +50,8 @@ First step = `● started`; last step with `if: always()` = `✓ done` / `✗ fa
 
 ```
 dev · 68454e8
-[Backend Pipeline][build-and-test]
+[Backend Pipeline]
+[build-and-test]
 ✓ done
 ```
 
@@ -58,12 +59,15 @@ On failure, the failed step ids are named in the status line:
 
 ```
 dev · 68454e8
-[Backend Pipeline][build-and-test]
+[Backend Pipeline]
+[build-and-test]
 ✗ failed · build, test
 ```
 
-- Every message starts with `branch · commit`, then `[workflow][job]`, then the status — three blocks, all small.
-- Colors follow the same palette as `compose/stg/utils/sendnotification`: text `#e8e8e8`, muted `#7f8c8d`, done `#2ecc71`, failed `#e74c3c`, cancelled `#f5b041`, started/in progress `#5dade2`, background `#2c3e50`.
+- Four blocks, all small: `branch · commit`, `[workflow]`, `[job]`, status.
+- Workflow and job names get a **deterministic color**: FNV-1a hash of the lowercased name → hue, with fixed saturation/lightness. The same name always gets the same color, on any machine — that's how you spot the same workflow or job across panels. 360 possible hues, so two names rarely collide exactly, but nearby hues look similar.
+- Every color is verified **≥ 4.5:1 WCAG contrast** against the `#2c3e50` background (worst possible hash hue: 4.92:1). A unit test sweeps all 360 hues, so no future palette tweak can silently break legibility.
+- Status colors: done `#2ecc71`, failed `#f1948a`, cancelled `#f5b041`, started/in progress `#85c1e9`; the `branch · commit` meta line is `#aab7b8`.
 
 ## Panel selection
 

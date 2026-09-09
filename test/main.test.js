@@ -6,6 +6,9 @@
  * action a steps-json whose steps carry failure/cancelled conclusions and
  * asserting the status line is rendered and posted. fetch is mocked; no
  * network, no real board, no real key.
+ *
+ * Color contract: every emitted color must clear 4.5:1 WCAG contrast on the
+ * #2c3e50 background — asserted by sweeping all 360 name hues.
  */
 const test = require("node:test");
 const assert = require("node:assert");
@@ -17,11 +20,15 @@ const action = require("../main.js");
 // ---------- helpers ----------
 
 const ENV_PREFIXES = /^(INPUT_|GITHUB_|PUSH_TO_DISPLAY_)/;
+const BACKGROUND = "#2c3e50";
 
 const META = [
-  { text: "dev · abcdef1", size: "small", color: "#7f8c8d" },
-  { text: "[Backend Pipeline][build-and-test]", size: "small", color: "#e8e8e8" },
+  { text: "dev · abcdef1", size: "small", color: "#aab7b8" },
+  { text: "[Backend Pipeline]", size: "small", color: "#e6a8be" },
+  { text: "[build-and-test]", size: "small", color: "#cfe6a8" },
 ];
+
+const statusOf = (blocks) => blocks[blocks.length - 1];
 
 function resetEnv() {
   for (const key of Object.keys(process.env)) {
@@ -68,6 +75,21 @@ function errResponse(status, body) {
   return { ok: false, status, text: async () => body };
 }
 
+function relativeLuminance(hex) {
+  const [r, g, b] = [1, 3, 5].map(
+    (i) => parseInt(hex.slice(i, i + 2), 16) / 255,
+  );
+  const f = (c) =>
+    c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+
+function contrast(hex, bg = BACKGROUND) {
+  const a = relativeLuminance(hex);
+  const b = relativeLuminance(bg);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
 test.beforeEach(() => {
   resetEnv();
   setEnv({
@@ -91,13 +113,55 @@ test("input: hyphen form (runner convention) and underscore form both work", () 
   assert.strictEqual(action.input("steps-json"), "{\"b\": {}}");
 });
 
+// ---------- name colors ----------
+
+test("name colors are deterministic and case-insensitive", () => {
+  assert.strictEqual(action.nameColor("Backend Pipeline"), "#e6a8be");
+  assert.strictEqual(action.nameColor("detect-changes"), "#a8b6e6");
+  assert.strictEqual(action.nameColor("build-and-test"), "#cfe6a8");
+  assert.strictEqual(
+    action.nameColor("Detect-Changes"),
+    action.nameColor("detect-changes"),
+  );
+});
+
+test("every possible name color clears 4.5:1 on the background", () => {
+  let worst = Infinity;
+  let worstHue = 0;
+  for (let hue = 0; hue < 360; hue++) {
+    const ratio = contrast(action.hslToHex(hue, 0.55, 0.78));
+    if (ratio < worst) {
+      worst = ratio;
+      worstHue = hue;
+    }
+  }
+  assert.ok(
+    worst >= 4.5,
+    `worst hue ${worstHue} is only ${worst.toFixed(2)}:1`,
+  );
+});
+
+test("status palette clears 4.5:1 on the background", () => {
+  for (const hex of [
+    "#e8e8e8",
+    "#aab7b8",
+    "#2ecc71",
+    "#f1948a",
+    "#f5b041",
+    "#85c1e9",
+  ]) {
+    const ratio = contrast(hex);
+    assert.ok(ratio >= 4.5, `${hex} is only ${ratio.toFixed(2)}:1`);
+  }
+});
+
 // ---------- status rendering ----------
 
 test("first position (empty steps context): started", () => {
   setEnv({ "INPUT_STEPS-JSON": "{}" });
   assert.deepStrictEqual(action.buildBlocks(), [
     ...META,
-    { text: "\u25cf started", size: "small", color: "#5dade2" },
+    { text: "\u25cf started", size: "small", color: "#85c1e9" },
   ]);
 });
 
@@ -113,7 +177,7 @@ test("services job at first position: container UUID step is hidden, still start
   });
   assert.deepStrictEqual(action.buildBlocks(), [
     ...META,
-    { text: "\u25cf started", size: "small", color: "#5dade2" },
+    { text: "\u25cf started", size: "small", color: "#85c1e9" },
   ]);
 });
 
@@ -138,9 +202,9 @@ test("skipped steps do not fail the job: done", () => {
       build: { conclusion: "success" },
     }),
   });
-  const blocks = action.buildBlocks();
-  assert.strictEqual(blocks[2].text, "\u2713 done");
-  assert.strictEqual(blocks[2].color, "#2ecc71");
+  const line = statusOf(action.buildBlocks());
+  assert.strictEqual(line.text, "\u2713 done");
+  assert.strictEqual(line.color, "#2ecc71");
 });
 
 test("mocked always(): failed steps are named in the status line", () => {
@@ -152,10 +216,13 @@ test("mocked always(): failed steps are named in the status line", () => {
       deploy: { conclusion: "skipped" },
     }),
   });
-  const blocks = action.buildBlocks();
-  assert.deepStrictEqual(blocks, [
+  assert.deepStrictEqual(action.buildBlocks(), [
     ...META,
-    { text: "\u2717 failed \u00b7 build, test", size: "small", color: "#e74c3c" },
+    {
+      text: "\u2717 failed \u00b7 build, test",
+      size: "small",
+      color: "#f1948a",
+    },
   ]);
 });
 
@@ -166,8 +233,7 @@ test("mocked always(): cancelled steps render amber", () => {
       "build-and-push": { conclusion: "cancelled" },
     }),
   });
-  const blocks = action.buildBlocks();
-  assert.deepStrictEqual(blocks, [
+  assert.deepStrictEqual(action.buildBlocks(), [
     ...META,
     {
       text: "\u2717 cancelled \u00b7 build-and-push",
@@ -184,9 +250,9 @@ test("failure wins over cancellation; only failed ids are named", () => {
       deploy: { conclusion: "cancelled" },
     }),
   });
-  const blocks = action.buildBlocks();
-  assert.strictEqual(blocks[2].text, "\u2717 failed \u00b7 build");
-  assert.strictEqual(blocks[2].color, "#e74c3c");
+  const line = statusOf(action.buildBlocks());
+  assert.strictEqual(line.text, "\u2717 failed \u00b7 build");
+  assert.strictEqual(line.color, "#f1948a");
 });
 
 test("progress input: mid-job report says in progress", () => {
@@ -196,7 +262,7 @@ test("progress input: mid-job report says in progress", () => {
   });
   assert.deepStrictEqual(action.buildBlocks(), [
     ...META,
-    { text: "\u25cf in progress", size: "small", color: "#5dade2" },
+    { text: "\u25cf in progress", size: "small", color: "#85c1e9" },
   ]);
 });
 
@@ -205,12 +271,15 @@ test("progress input does not mask a failure", () => {
     "INPUT_STEPS-JSON": JSON.stringify({ build: { conclusion: "failure" } }),
     "INPUT_PROGRESS": "true",
   });
-  assert.strictEqual(action.buildBlocks()[2].text, "\u2717 failed \u00b7 build");
+  assert.strictEqual(
+    statusOf(action.buildBlocks()).text,
+    "\u2717 failed \u00b7 build",
+  );
 });
 
 test("progress input is ignored when nothing has run yet", () => {
   setEnv({ "INPUT_STEPS-JSON": "{}", "INPUT_PROGRESS": "true" });
-  assert.strictEqual(action.buildBlocks()[2].text, "\u25cf started");
+  assert.strictEqual(statusOf(action.buildBlocks()).text, "\u25cf started");
 });
 
 test("runner machinery and report steps are hidden", () => {
@@ -224,7 +293,7 @@ test("runner machinery and report steps are hidden", () => {
       "complete-job": { conclusion: "success" },
     }),
   });
-  assert.strictEqual(action.buildBlocks()[2].text, "\u2713 done");
+  assert.strictEqual(statusOf(action.buildBlocks()).text, "\u2713 done");
 });
 
 test("current report step (no conclusion yet) is ignored", () => {
@@ -234,14 +303,17 @@ test("current report step (no conclusion yet) is ignored", () => {
       "report-to-display----end-": { conclusion: null, outcome: null },
     }),
   });
-  assert.strictEqual(action.buildBlocks()[2].text, "\u2713 done");
+  assert.strictEqual(statusOf(action.buildBlocks()).text, "\u2713 done");
 });
 
 test("outcome is honored when conclusion is absent", () => {
   setEnv({
     "INPUT_STEPS-JSON": JSON.stringify({ test: { outcome: "failure" } }),
   });
-  assert.strictEqual(action.buildBlocks()[2].text, "\u2717 failed \u00b7 test");
+  assert.strictEqual(
+    statusOf(action.buildBlocks()).text,
+    "\u2717 failed \u00b7 test",
+  );
 });
 
 test("missing steps-json warns and pushes metadata only", () => {
