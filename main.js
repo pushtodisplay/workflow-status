@@ -1,23 +1,28 @@
 /*
- * Workflow Status — own-job reporting for a Push to Display board.
+ * Workflow Status — own-job status on a Push to Display board.
  *
- * One report step per job, placed anywhere in the job:
- *   - first step (nothing has run yet): "job started" banner — env only
- *   - any later step: the job's own record — verdict + every user step that
- *     already has a result (progress or final, depending on placement)
+ * One report step per job, placed anywhere:
+ *   - first step (nothing has run yet): "● started"
+ *   - middle of the job: add progress: "true" → "● in progress"
+ *   - last step: "✓ done", or "✗ failed · <ids>" / "✗ cancelled · <ids>"
  *
- * No GitHub API, no GITHUB_TOKEN, no permissions needed. The job's own
- * step results come from the calling workflow's steps context, passed as
- * steps-json = toJSON(steps) and computed by GitHub itself.
+ * The job's own step results come from the calling workflow's steps context,
+ * passed as steps-json = toJSON(steps) and computed by GitHub itself. The
+ * steps context only contains id-bearing steps that have already run, so a
+ * report placed mid-job can only see what ran before it — and the runner
+ * exposes no total step count to compare against. Hence the progress flag:
+ * the caller is the only one who knows the report is not the last step.
+ *
+ * No GitHub API, no GITHUB_TOKEN, no permissions needed.
  *
  * Fails soft: any error emits an annotation warning; the process exits 0 —
  * the workflow result is never affected. No dependencies, no retries, 30s
  * bound on the one request the action makes (to Push to Display).
  *
  * Reads inputs from INPUT_* env (set by the runner from action.yml inputs):
- *   INPUT_STEPS_JSON, INPUT_API_KEY, INPUT_API_URL, INPUT_BOARD_ID,
- *   INPUT_PANEL_ID, INPUT_PRD_PANEL, INPUT_DEV_PANEL, INPUT_PRD_BRANCH,
- *   INPUT_LABEL
+ *   INPUT_STEPS-JSON, INPUT_PROGRESS, INPUT_API-KEY, INPUT_API-URL,
+ *   INPUT_BOARD-ID, INPUT_PANEL-ID, INPUT_PRD-PANEL, INPUT_DEV-PANEL,
+ *   INPUT_PRD-BRANCH, INPUT_LABEL
  * plus runner env: GITHUB_WORKFLOW, GITHUB_JOB, GITHUB_REF, GITHUB_REF_NAME,
  *   GITHUB_HEAD_REF, GITHUB_SHA, GITHUB_OUTPUT
  * plus fallbacks: PUSH_TO_DISPLAY_API_KEY, PUSH_TO_DISPLAY_BOARD.
@@ -25,8 +30,18 @@
 const { appendFileSync } = require("node:fs");
 
 const env = process.env;
-const MAX_BLOCKS = 60;
 const REQUEST_TIMEOUT_MS = 30_000; // the action owns its own bound
+
+// Palette mirrors compose/stg/utils/sendnotification (same flat-UI family).
+const COLOR = {
+  text: "#e8e8e8", // message text
+  muted: "#7f8c8d", // timestamp / branch · sha
+  ok: "#2ecc71", // green — done
+  fail: "#e74c3c", // red — failed
+  warn: "#f5b041", // amber — cancelled
+  running: "#5dade2", // blue — started / in progress
+};
+const BACKGROUND = "#2c3e50";
 
 // ---------- helpers ----------
 
@@ -42,6 +57,10 @@ function input(name) {
   const value =
     env[`INPUT_${key}`] ?? env[`INPUT_${key.replace(/-/g, "_")}`] ?? "";
   return value.trim();
+}
+
+function isTruthy(value) {
+  return /^(1|true|yes|on)$/i.test((value || "").trim());
 }
 
 function writeOutput(name, value) {
@@ -82,19 +101,14 @@ function resolvePanel() {
     : input("dev-panel") || "2";
 }
 
-// ---------- own-job record ----------
-
-const STEP_STYLES = {
-  success: { sym: "\u2713", color: "#22c55e" }, // ✓ green
-  failure: { sym: "\u2717", color: "#ef4444" }, // ✗ red
-  cancelled: { sym: "\u2717", color: "#f59e0b" }, // ✗ orange
-  skipped: { sym: "\u23ed", color: "#9ca3af" }, // ⏭ grey
-};
+// ---------- own-job status ----------
 
 // Steps that are not the user's own: runner machinery (Set up job, Post …,
-// Complete job, container init/stop) and the Push to Display reporter itself.
-// Steps are keyed by their (auto-generated) step id — GitHub's own
-// normalization of the step name: lowercased, non-alphanumerics -> hyphens.
+// Complete job) and the Push to Display reporter itself. Service-container
+// steps are keyed by a runner-generated UUID, not a name — and they run
+// before the first user step, so a uuid-shaped key would otherwise make a
+// just-started services job look like a finished one. User steps always
+// carry the id: they declare, so uuid keys are never user steps.
 function isHiddenStep(key) {
   const k = (key || "").toLowerCase();
   return (
@@ -103,13 +117,15 @@ function isHiddenStep(key) {
     k === "initialize-containers" ||
     k === "stop-containers" ||
     k.startsWith("post-") ||
+    /^[0-9a-f]{32}$/.test(k) ||
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(k) ||
     k.includes("report-to-display") ||
     k.includes("push-to-display") ||
     k.includes("pushtodisplay")
   );
 }
 
-// Step ids shown verbatim as GitHub normalized them; tidy runs of hyphens.
+// Step ids shown as GitHub normalized them; tidy runs of hyphens.
 function displayStepName(key) {
   return (key || "").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
@@ -134,13 +150,18 @@ function parseStepsJson() {
   }
 }
 
-function bannerBlocks() {
+// Every message: branch · sha first, then [workflow][job].
+function metaBlocks() {
   return [
-    { text: `[${getLabel()}][${getSelfJob()}]`, size: "small" },
     {
       text: `${getBranch()} \u00b7 ${getSha()}`,
       size: "small",
-      color: "#9ca3af",
+      color: COLOR.muted,
+    },
+    {
+      text: `[${getLabel()}][${getSelfJob()}]`,
+      size: "small",
+      color: COLOR.text,
     },
   ];
 }
@@ -151,7 +172,7 @@ function buildBlocks() {
     warn(
       "steps-json missing or unparsable — pass with: steps-json: ${{ toJSON(steps) }}; only run metadata pushed",
     );
-    return bannerBlocks();
+    return metaBlocks();
   }
 
   const terminal = Object.entries(stepsJson)
@@ -168,46 +189,33 @@ function buildBlocks() {
           s.conclusion === "skipped"),
     );
 
-  // Nothing has run yet: this step is the first step of the job — announce it.
-  if (terminal.length === 0) return bannerBlocks();
+  const failed = terminal.filter((s) => s.conclusion === "failure");
+  const cancelled = terminal.filter((s) => s.conclusion === "cancelled");
+  const names = (steps) =>
+    steps.map((s) => displayStepName(s.key)).join(", ");
 
-  const failed = terminal.filter(
-    (s) => s.conclusion === "failure" || s.conclusion === "cancelled",
-  );
-  const sym = failed.length ? "\u2717" : "\u2713";
-  const color = failed.length ? "#ef4444" : "#22c55e";
-
-  const blocks = [
-    { text: `[${getLabel()}][${getSelfJob()}]`, size: "small" },
-    {
-      text: `${getBranch()} \u00b7 ${getSha()}`,
-      size: "small",
-      color: "#9ca3af",
-    },
-    {
-      text: `${sym} ${terminal.length} steps${
-        failed.length ? ` \u00b7 ${failed.length} failed` : ""
-      }`,
-      size: "small",
-      color,
-    },
-  ];
-  for (const step of terminal) {
-    const style = STEP_STYLES[step.conclusion] ?? {
-      sym: "\u25cc",
-      color: "#9ca3af",
+  let status;
+  if (terminal.length === 0) {
+    // Nothing has run yet: the report step is the job's first step.
+    status = { text: "\u25cf started", color: COLOR.running };
+  } else if (failed.length) {
+    status = {
+      text: `\u2717 failed \u00b7 ${names(failed)}`,
+      color: COLOR.fail,
     };
-    blocks.push({
-      text: `  ${style.sym} ${displayStepName(step.key)}`,
-      size: "small",
-      color: style.color,
-    });
+  } else if (cancelled.length) {
+    status = {
+      text: `\u2717 cancelled \u00b7 ${names(cancelled)}`,
+      color: COLOR.warn,
+    };
+  } else if (isTruthy(input("progress"))) {
+    // Mid-job report: the caller declared the job is not finished.
+    status = { text: "\u25cf in progress", color: COLOR.running };
+  } else {
+    status = { text: "\u2713 done", color: COLOR.ok };
   }
-  if (blocks.length > MAX_BLOCKS) {
-    blocks.splice(MAX_BLOCKS);
-    blocks.push({ text: "\u2026and more", size: "small", color: "#9ca3af" });
-  }
-  return blocks;
+
+  return [...metaBlocks(), { text: status.text, size: "small", color: status.color }];
 }
 
 // ---------- Push to Display API ----------
@@ -224,7 +232,7 @@ async function pushToDisplay(panelId, blocks) {
   }
 
   const url = `${apiUrl}/v1/updates`;
-  const payload = { boardId, panelId, blocks };
+  const payload = { boardId, panelId, blocks, background: BACKGROUND };
   console.log(
     `Push to Display: payload to send → ${url}: ${JSON.stringify(payload)}`,
   );
@@ -290,6 +298,7 @@ if (require.main === module) {
 module.exports = {
   warn,
   input,
+  isTruthy,
   writeOutput,
   getLabel,
   getBranch,
@@ -299,7 +308,7 @@ module.exports = {
   isHiddenStep,
   displayStepName,
   parseStepsJson,
-  bannerBlocks,
+  metaBlocks,
   buildBlocks,
   pushToDisplay,
   run,

@@ -8,7 +8,10 @@ branding:
 
 inputs:
   steps-json:
-    description: "Serialized steps context of the calling job (the workflow passes toJSON(steps)). Only steps that declare an id: are included — that id is the line shown on the board. An empty steps context means the step is first: job started banner; otherwise the job's record."
+    description: "Serialized steps context of the calling job (the workflow passes toJSON(steps)). Only steps that declare an id: are included — GitHub itself computes this list. Empty context means the report step is first: status 'started'. Otherwise the job's status: done, failed, cancelled, or in progress."
+    required: false
+  progress:
+    description: "Set to true on report steps placed in the middle of a job — the job is still running, so the status is 'in progress' instead of 'done'. Leave unset on the first or last report step. A failure or cancellation is always reported as such."
     required: false
   api-key:
     description: "API key for authentication. Optional when the workflow or job sets env PUSH_TO_DISPLAY_API_KEY."

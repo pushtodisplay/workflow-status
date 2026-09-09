@@ -6,13 +6,19 @@ No GitHub API. No `GITHUB_TOKEN`. No rate limits. No permissions. Runs as a `nod
 
 ## How it works
 
-Add one report step to a job. The step reacts to where it is:
+Add one report step to a job. The status is derived from the calling workflow's `steps` context (`${{ toJSON(steps) }}`) — computed by GitHub itself, exact by construction:
 
-- **First step of the job** — nothing has run yet → pushes a "job started" banner (built from runner env only).
-- **Any later step** — pushes the job's own record: verdict + every user step that already has a result (progress if mid-job, the full record if last).
-- **`if: always()`** on the last step → the record is pushed even after failures.
+| what the report sees | status |
+|---|---|
+| nothing has run yet (first step) | `● started` |
+| steps ran, all succeeded (or skipped) | `✓ done` |
+| steps ran, all succeeded, `progress: "true"` set | `● in progress` |
+| any step failed | `✗ failed · <step ids>` |
+| no failures, any step cancelled | `✗ cancelled · <step ids>` |
 
-The job's step results come from the calling workflow's `steps` context (`${{ toJSON(steps) }}`) — computed by GitHub itself, exact by construction. Step ids are GitHub's own normalization of step names (lowercased, `-` separators); the report step itself and the runner's machinery (`Set up job`, `Post …`, etc.) are hidden.
+Failures and cancellations always win over `progress`. Missing/unparsable `steps-json` warns and pushes metadata only (fail-soft, exit 0).
+
+The `steps` context contains only steps that declare an `id:` **and have already run** — so a report step can never see steps after it, and the runner exposes no total step count. That is why a report placed mid-job must set `progress: "true"`; otherwise it looks exactly like a final report. The reporter's own steps, the runner's machinery (`Set up job`, `Post …`, `Complete job`) and service-container steps (keyed by a runner-generated UUID) are never counted.
 
 ## Usage
 
@@ -38,23 +44,26 @@ jobs:
           steps-json: ${{ toJSON(steps) }}
 ```
 
-First step = "started" banner; last step with `if: always()` = the job's record. Same config both times — no `phase`, nothing to learn.
+First step = `● started`; last step with `if: always()` = `✓ done` / `✗ failed`. Same config both times — no `phase`, nothing to learn. If you also report mid-job, add `progress: "true"` to that step only.
 
 ## What the board shows
 
 ```
+dev · 68454e8
 [Backend Pipeline][build-and-test]
-dev · 6c14266
-✓ 6 steps
-    ✓ Initialize containers
-    ✓ Run actions/checkout@v4.2.0
-    ✗ Run all tests (unit + integration)
-    ...
+✓ done
 ```
 
-- All text small; every message starts with `[workflow name][job name]`, then branch · commit.
-- Verdict line: `✓ N steps` (green) or `✗ N steps · M failed` (red), followed by each step with its own symbol (✓ / ✗ / ✗ orange cancelled / ⏭ skipped).
-- The reporter's own steps and the runner's auto steps are never shown.
+On failure, the failed step ids are named in the status line:
+
+```
+dev · 68454e8
+[Backend Pipeline][build-and-test]
+✗ failed · build, test
+```
+
+- Every message starts with `branch · commit`, then `[workflow][job]`, then the status — three blocks, all small.
+- Colors follow the same palette as `compose/stg/utils/sendnotification`: text `#e8e8e8`, muted `#7f8c8d`, done `#2ecc71`, failed `#e74c3c`, cancelled `#f5b041`, started/in progress `#5dade2`, background `#2c3e50`.
 
 ## Panel selection
 
@@ -66,7 +75,8 @@ Each push overwrites the same panel — the board keeps only the latest message.
 
 | Input | Default | Notes |
 |---|---|---|
-| `steps-json` | — | `${{ toJSON(steps) }}` — required for meaningful output; without it only run metadata is pushed (warning logged) |
+| `steps-json` | — | `${{ toJSON(steps) }}` — required for a status; without it only run metadata is pushed (warning logged) |
+| `progress` | — | `"true"` on report steps placed mid-job → `● in progress` |
 | `api-key` | `PUSH_TO_DISPLAY_API_KEY` | |
 | `api-url` | `https://api.pushtodisplay.com` | override for self-hosted |
 | `board-id` | `PUSH_TO_DISPLAY_BOARD` | defaults to the account board |
@@ -78,4 +88,4 @@ Each push overwrites the same panel — the board keeps only the latest message.
 
 ## Failure behavior
 
-The action never fails a workflow. Missing key, bad key, board API down, timeouts — all become a `::warning::` line and a clean exit 0. Requests are time-boxed (30s), no retries. Missing `steps-json` warns and pushes run metadata only.
+The action never fails a workflow. Missing key, bad key, board API down, timeouts — all become a `::warning::` line and a clean exit 0. Requests are time-boxed (30s), no retries.

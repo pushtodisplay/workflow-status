@@ -4,7 +4,7 @@
  * The failure behavior is mock-tested: "the job failed, the report step
  * still runs" (if: always() on the runner) is modeled here by feeding the
  * action a steps-json whose steps carry failure/cancelled conclusions and
- * asserting the red record is rendered and posted. fetch is mocked; no
+ * asserting the status line is rendered and posted. fetch is mocked; no
  * network, no real board, no real key.
  */
 const test = require("node:test");
@@ -17,6 +17,11 @@ const action = require("../main.js");
 // ---------- helpers ----------
 
 const ENV_PREFIXES = /^(INPUT_|GITHUB_|PUSH_TO_DISPLAY_)/;
+
+const META = [
+  { text: "dev · abcdef1", size: "small", color: "#7f8c8d" },
+  { text: "[Backend Pipeline][build-and-test]", size: "small", color: "#e8e8e8" },
+];
 
 function resetEnv() {
   for (const key of Object.keys(process.env)) {
@@ -86,24 +91,163 @@ test("input: hyphen form (runner convention) and underscore form both work", () 
   assert.strictEqual(action.input("steps-json"), "{\"b\": {}}");
 });
 
-// ---------- position handling ----------
+// ---------- status rendering ----------
 
-test("first position (empty steps context) renders the banner", () => {
-  setEnv({ "INPUT_STEPS-JSON": "{}", GITHUB_JOB: "detect-changes" });
+test("first position (empty steps context): started", () => {
+  setEnv({ "INPUT_STEPS-JSON": "{}" });
   assert.deepStrictEqual(action.buildBlocks(), [
-    { text: "[Backend Pipeline][detect-changes]", size: "small" },
-    { text: "dev · abcdef1", size: "small", color: "#9ca3af" },
+    ...META,
+    { text: "\u25cf started", size: "small", color: "#5dade2" },
   ]);
 });
 
-test("missing steps-json warns and falls back to the banner", () => {
+test("services job at first position: container UUID step is hidden, still started", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({
+      "3edeadad5d974c0a83300afae48ec755": {
+        outputs: {},
+        outcome: "success",
+        conclusion: "success",
+      },
+    }),
+  });
+  assert.deepStrictEqual(action.buildBlocks(), [
+    ...META,
+    { text: "\u25cf started", size: "small", color: "#5dade2" },
+  ]);
+});
+
+test("all steps succeeded: done", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({
+      checkout: { conclusion: "success" },
+      build: { conclusion: "success" },
+      test: { conclusion: "success" },
+    }),
+  });
+  assert.deepStrictEqual(action.buildBlocks(), [
+    ...META,
+    { text: "\u2713 done", size: "small", color: "#2ecc71" },
+  ]);
+});
+
+test("skipped steps do not fail the job: done", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({
+      lint: { conclusion: "skipped" },
+      build: { conclusion: "success" },
+    }),
+  });
+  const blocks = action.buildBlocks();
+  assert.strictEqual(blocks[2].text, "\u2713 done");
+  assert.strictEqual(blocks[2].color, "#2ecc71");
+});
+
+test("mocked always(): failed steps are named in the status line", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({
+      checkout: { conclusion: "success" },
+      build: { conclusion: "failure" },
+      test: { conclusion: "failure" },
+      deploy: { conclusion: "skipped" },
+    }),
+  });
+  const blocks = action.buildBlocks();
+  assert.deepStrictEqual(blocks, [
+    ...META,
+    { text: "\u2717 failed \u00b7 build, test", size: "small", color: "#e74c3c" },
+  ]);
+});
+
+test("mocked always(): cancelled steps render amber", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({
+      checkout: { conclusion: "success" },
+      "build-and-push": { conclusion: "cancelled" },
+    }),
+  });
+  const blocks = action.buildBlocks();
+  assert.deepStrictEqual(blocks, [
+    ...META,
+    {
+      text: "\u2717 cancelled \u00b7 build-and-push",
+      size: "small",
+      color: "#f5b041",
+    },
+  ]);
+});
+
+test("failure wins over cancellation; only failed ids are named", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({
+      build: { conclusion: "failure" },
+      deploy: { conclusion: "cancelled" },
+    }),
+  });
+  const blocks = action.buildBlocks();
+  assert.strictEqual(blocks[2].text, "\u2717 failed \u00b7 build");
+  assert.strictEqual(blocks[2].color, "#e74c3c");
+});
+
+test("progress input: mid-job report says in progress", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({ checkout: { conclusion: "success" } }),
+    "INPUT_PROGRESS": "true",
+  });
+  assert.deepStrictEqual(action.buildBlocks(), [
+    ...META,
+    { text: "\u25cf in progress", size: "small", color: "#5dade2" },
+  ]);
+});
+
+test("progress input does not mask a failure", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({ build: { conclusion: "failure" } }),
+    "INPUT_PROGRESS": "true",
+  });
+  assert.strictEqual(action.buildBlocks()[2].text, "\u2717 failed \u00b7 build");
+});
+
+test("progress input is ignored when nothing has run yet", () => {
+  setEnv({ "INPUT_STEPS-JSON": "{}", "INPUT_PROGRESS": "true" });
+  assert.strictEqual(action.buildBlocks()[2].text, "\u25cf started");
+});
+
+test("runner machinery and report steps are hidden", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({
+      "set-up-job": { conclusion: "success" },
+      "report-to-display----start-": { conclusion: "success" },
+      "initialize-containers": { conclusion: "success" },
+      "run-actions-checkout-v4": { conclusion: "success" },
+      "post-run-actions-checkout-v4": { conclusion: "success" },
+      "complete-job": { conclusion: "success" },
+    }),
+  });
+  assert.strictEqual(action.buildBlocks()[2].text, "\u2713 done");
+});
+
+test("current report step (no conclusion yet) is ignored", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({
+      checkout: { conclusion: "success" },
+      "report-to-display----end-": { conclusion: null, outcome: null },
+    }),
+  });
+  assert.strictEqual(action.buildBlocks()[2].text, "\u2713 done");
+});
+
+test("outcome is honored when conclusion is absent", () => {
+  setEnv({
+    "INPUT_STEPS-JSON": JSON.stringify({ test: { outcome: "failure" } }),
+  });
+  assert.strictEqual(action.buildBlocks()[2].text, "\u2717 failed \u00b7 test");
+});
+
+test("missing steps-json warns and pushes metadata only", () => {
   const cap = captureLogs();
   try {
-    const blocks = action.buildBlocks();
-    assert.deepStrictEqual(blocks, [
-      { text: "[Backend Pipeline][build-and-test]", size: "small" },
-      { text: "dev · abcdef1", size: "small", color: "#9ca3af" },
-    ]);
+    assert.deepStrictEqual(action.buildBlocks(), META);
     assert.ok(
       cap.logs.some((l) => l.includes("steps-json missing")),
       "expected a warning about steps-json",
@@ -113,108 +257,15 @@ test("missing steps-json warns and falls back to the banner", () => {
   }
 });
 
-test("unparsable steps-json warns and falls back to the banner", () => {
+test("unparsable steps-json warns and pushes metadata only", () => {
   setEnv({ "INPUT_STEPS-JSON": "{nope" });
   const cap = captureLogs();
   try {
-    assert.deepStrictEqual(action.buildBlocks(), [
-      { text: "[Backend Pipeline][build-and-test]", size: "small" },
-      { text: "dev · abcdef1", size: "small", color: "#9ca3af" },
-    ]);
+    assert.deepStrictEqual(action.buildBlocks(), META);
     assert.ok(cap.logs.some((l) => l.includes("steps-json missing")));
   } finally {
     cap.restore();
   }
-});
-
-// ---------- record rendering ----------
-
-test("record: successful steps render green, runner and report steps hidden", () => {
-  setEnv({
-    "INPUT_STEPS-JSON": JSON.stringify({
-      "set-up-job": { conclusion: "success" },
-      "report-to-display----start-": { conclusion: "success" },
-      "initialize-containers": { conclusion: "success" },
-      "run-actions-checkout-v4": { conclusion: "success" },
-      "install-dependencies-and-build": { conclusion: "success" },
-      "run-all-tests-unit-integration": { conclusion: "success" },
-      "post-run-actions-checkout-v4": { conclusion: "success" },
-      "complete-job": { conclusion: "success" },
-    }),
-  });
-  const blocks = action.buildBlocks();
-  assert.strictEqual(blocks[2].text, "\u2713 3 steps");
-  assert.strictEqual(blocks[2].color, "#22c55e");
-  const shown = blocks.slice(3).map((b) => b.text);
-  assert.deepStrictEqual(shown, [
-    "  \u2713 run-actions-checkout-v4",
-    "  \u2713 install-dependencies-and-build",
-    "  \u2713 run-all-tests-unit-integration",
-  ]);
-});
-
-test("mocked always(): failed step renders a red record", () => {
-  setEnv({
-    "INPUT_STEPS-JSON": JSON.stringify({
-      "run-actions-checkout-v4": { conclusion: "success" },
-      "install-dependencies-and-build": { conclusion: "success" },
-      "run-all-tests-unit-integration": { conclusion: "failure" },
-    }),
-  });
-  const blocks = action.buildBlocks();
-  assert.strictEqual(blocks[2].text, "\u2717 3 steps \u00b7 1 failed");
-  assert.strictEqual(blocks[2].color, "#ef4444");
-  const failed = blocks.find((b) => b.text.includes("run-all-tests"));
-  assert.strictEqual(failed.color, "#ef4444");
-});
-
-test("mocked always(): cancelled step counts as failed, rendered orange", () => {
-  setEnv({
-    "INPUT_STEPS-JSON": JSON.stringify({
-      "set-up-job": { conclusion: "success" },
-      "build-and-push": { conclusion: "cancelled" },
-      "complete-job": { conclusion: "success" },
-    }),
-  });
-  const blocks = action.buildBlocks();
-  assert.strictEqual(blocks[2].text, "\u2717 1 steps \u00b7 1 failed");
-  const line = blocks.find((b) => b.text.includes("build-and-push"));
-  assert.strictEqual(line.color, "#f59e0b");
-});
-
-test("skipped step is shown grey and does not fail the record", () => {
-  setEnv({
-    "INPUT_STEPS-JSON": JSON.stringify({
-      lint: { conclusion: "skipped" },
-      build: { conclusion: "success" },
-    }),
-  });
-  const blocks = action.buildBlocks();
-  assert.strictEqual(blocks[2].text, "\u2713 2 steps");
-  const line = blocks.find((b) => b.text.includes("lint"));
-  assert.strictEqual(line.color, "#9ca3af");
-});
-
-test("current report step (no conclusion yet) is ignored", () => {
-  setEnv({
-    "INPUT_STEPS-JSON": JSON.stringify({
-      "run-actions-checkout-v4": { conclusion: "success" },
-      "report-to-display----end-": { conclusion: null, outcome: null },
-    }),
-  });
-  const blocks = action.buildBlocks();
-  assert.strictEqual(blocks[2].text, "\u2713 1 steps");
-  assert.ok(!blocks.some((b) => b.text.includes("report-to-display")));
-});
-
-test("outcome is honored when conclusion is absent", () => {
-  setEnv({
-    "INPUT_STEPS-JSON": JSON.stringify({
-      "run-all-tests-unit-integration": { outcome: "failure" },
-    }),
-  });
-  const blocks = action.buildBlocks();
-  assert.strictEqual(blocks[2].text, "\u2717 1 steps \u00b7 1 failed");
 });
 
 // ---------- panel resolution ----------
@@ -242,7 +293,7 @@ test("panel: prd-branch input overrides default main", () => {
 
 // ---------- push: mocked fetch ----------
 
-test("push: posts the rendered payload with the api key", async () => {
+test("push: posts payload with background and the api key", async () => {
   const fetchMock = mockFetch(() => okResponse());
   try {
     setEnv({
@@ -250,7 +301,7 @@ test("push: posts the rendered payload with the api key", async () => {
       "INPUT_API-URL": "http://board.test",
       "INPUT_BOARD-ID": "board-1",
     });
-    const blocks = action.bannerBlocks();
+    const blocks = action.metaBlocks();
     await action.pushToDisplay("2", blocks);
     assert.strictEqual(fetchMock.calls.length, 1);
     const { url, init } = fetchMock.calls[0];
@@ -260,6 +311,7 @@ test("push: posts the rendered payload with the api key", async () => {
     const body = JSON.parse(init.body);
     assert.strictEqual(body.panelId, "2");
     assert.strictEqual(body.boardId, "board-1");
+    assert.strictEqual(body.background, "#2c3e50");
     assert.deepStrictEqual(body.blocks, blocks);
   } finally {
     fetchMock.restore();
@@ -271,7 +323,7 @@ test("push: missing api key warns and never fetches", async () => {
   const cap = captureLogs();
   try {
     setEnv({ "INPUT_API-URL": "http://board.test" });
-    await action.pushToDisplay("2", action.bannerBlocks());
+    await action.pushToDisplay("2", action.metaBlocks());
     assert.strictEqual(fetchMock.calls.length, 0);
     assert.ok(cap.logs.some((l) => l.includes("missing API key")));
   } finally {
@@ -285,7 +337,7 @@ test("push: api error throws a descriptive error (run() warns, exit stays 0)", a
   try {
     setEnv({ "INPUT_API-KEY": "bad", "INPUT_API-URL": "http://board.test" });
     await assert.rejects(
-      action.pushToDisplay("2", action.bannerBlocks()),
+      action.pushToDisplay("2", action.metaBlocks()),
       /401/,
     );
   } finally {
@@ -300,7 +352,7 @@ test("push: timeout is surfaced as a clear timeout error", async () => {
   try {
     setEnv({ "INPUT_API-KEY": "k", "INPUT_API-URL": "http://board.test" });
     await assert.rejects(
-      action.pushToDisplay("2", action.bannerBlocks()),
+      action.pushToDisplay("2", action.metaBlocks()),
       /timed out after 30s/,
     );
   } finally {
@@ -318,7 +370,7 @@ test("run(): missing key + temp output file — warns, writes panel-id, exit 0",
     setEnv({
       GITHUB_OUTPUT: outFile,
       "INPUT_STEPS-JSON": JSON.stringify({
-        "run-actions-checkout-v4": { conclusion: "success" },
+        checkout: { conclusion: "success" },
       }),
     });
     await action.run();

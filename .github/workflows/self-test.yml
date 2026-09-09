@@ -34,6 +34,7 @@ jobs:
         uses: ./
         with:
           steps-json: ${{ toJSON(steps) }}
+          progress: "true"
       - name: Simulated work 2
         id: work2
         run: echo "doing more work"
